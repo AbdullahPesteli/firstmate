@@ -409,7 +409,7 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  { [ "$class" = none ] || [ "$class" = done ]; } && [ "${agent_alive:-unknown}" = dead ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;

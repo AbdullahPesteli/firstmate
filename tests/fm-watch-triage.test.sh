@@ -808,6 +808,35 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
     || fail "captain-held dead-agent pane surfaced as a stopped crew"
 
+  # The reconciler-done variant of the same dead-agent hold: a declared pause whose
+  # run then genuinely completed (state: done) with a confidently dead agent must
+  # still resolve to the bounded PAUSE_RESURFACE cadence, never an immediate wake.
+  dir=$(make_case exited-paused-reconciler-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle bare shell after a completed run\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: held per captain while an external decision is pending\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after a completed run")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "reconciler-done dead-agent pause did not re-surface on the bounded cadence"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    || fail "reconciler-done dead-agent pause surfaced immediately instead of using the bounded paused recheck"
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$bare" -eq 0 ] || fail "reconciler-done dead-agent pause surfaced as $bare bare stale wakes"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a reconciler-done dead-agent pause must not arm a wedge timer"
+
   dir=$(make_case alive-decision-gate); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
   window="test:fm-gate"

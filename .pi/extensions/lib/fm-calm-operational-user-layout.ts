@@ -5,7 +5,10 @@
 // message delivery.
 import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import {
+  calmPresentationHides,
+  noteFirstmateOperationalUserProvenance,
+} from "./fm-calm-visibility.ts";
 import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
 
 type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
@@ -38,6 +41,7 @@ type InteractiveModePrototype = {
 type CalmOperationalUserLayoutPatch = {
   hidesOperationalInput: () => boolean;
   isOperationalInput: (text: string) => boolean;
+  noteUserProvenance: (operational: boolean) => void;
 };
 
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
@@ -75,12 +79,14 @@ export function installCalmOperationalUserLayout(): void {
   if (installed) {
     installed.hidesOperationalInput = hidesOperationalInput;
     installed.isOperationalInput = isOperationalInput;
+    installed.noteUserProvenance = noteFirstmateOperationalUserProvenance;
     return;
   }
 
   const patch: CalmOperationalUserLayoutPatch = {
     hidesOperationalInput,
     isOperationalInput,
+    noteUserProvenance: noteFirstmateOperationalUserProvenance,
   };
   const InteractiveMode = PiCodingAgent.InteractiveMode;
   if (typeof InteractiveMode !== "function") {
@@ -120,25 +126,29 @@ export function installCalmOperationalUserLayout(): void {
     message: UserMessageLike,
     options?: AddMessageOptions,
   ): void {
-    if (message.role !== "user" || !contentIsTextOnly(message.content)) {
-      originalAddMessageToChat.call(this, message, options);
-      return;
+    // Record the provenance of every user message so the assistant-row adapter
+    // can bind a routine acknowledgement to a typed operational origin: a user
+    // message resets it to genuine, and only a typed operational input marks it
+    // operational. A non-user message never touches provenance.
+    if (message.role === "user") {
+      const textOnly = contentIsTextOnly(message.content);
+      const text = textOnly ? this.getUserMessageText(message) : "";
+      const operational = textOnly && text.length > 0 && patch.isOperationalInput(text);
+      patch.noteUserProvenance(operational);
+      if (operational) {
+        const component = new CalmOperationalUserMessageComponent(
+          text,
+          this.getMarkdownThemeWithSettings(),
+          this.outputPad,
+          this.chatContainer.children.length > 0,
+        );
+        this.chatContainer.addChild(component);
+        if (options?.populateHistory) this.editor.addToHistory?.(text);
+        return;
+      }
     }
 
-    const text = this.getUserMessageText(message);
-    if (!text || !patch.isOperationalInput(text)) {
-      originalAddMessageToChat.call(this, message, options);
-      return;
-    }
-
-    const component = new CalmOperationalUserMessageComponent(
-      text,
-      this.getMarkdownThemeWithSettings(),
-      this.outputPad,
-      this.chatContainer.children.length > 0,
-    );
-    this.chatContainer.addChild(component);
-    if (options?.populateHistory) this.editor.addToHistory?.(text);
+    originalAddMessageToChat.call(this, message, options);
   };
 
   registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH] = patch;

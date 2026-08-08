@@ -63,6 +63,32 @@ type FirstmateSyntheticPresentation = {
 let calm = false;
 let stockExportRendering = false;
 
+// The exact no-action routine acknowledgement AGENTS.md section 9 requires
+// firstmate to send when an operational update's specific event needs no action
+// but a reply must still go out. This literal is that instruction's presentation
+// dependency: Calm collapses this assistant row, and ONLY this exact response,
+// and only when it answers a typed Firstmate operational input (bound through
+// lastUserMessageWasFirstmateOperational below, never by string alone). Keep it
+// byte-identical to AGENTS.md section 9; a change to either must update both.
+export const FIRSTMATE_OPERATIONAL_ACK = "Captain, shipshape.";
+
+// Provenance of the message that immediately preceded the assistant currently
+// being built: true only when it was a typed Firstmate operational input. The
+// operational-user-row adapter sets this on every user message it sees; the
+// assistant-row adapter captures it once, at its component's first content
+// update, so a routine acknowledgement is bound to its operational origin rather
+// than hidden by its text alone. Ephemeral and single-writer: it is meaningful
+// only between one user message and the assistant that answers it.
+let lastUserWasFirstmateOperational = false;
+
+export function noteFirstmateOperationalUserProvenance(operational: boolean): void {
+  lastUserWasFirstmateOperational = operational;
+}
+
+export function lastUserMessageWasFirstmateOperational(): boolean {
+  return lastUserWasFirstmateOperational;
+}
+
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
   return CALM_VISIBLE_CLASSES.has(itemClass);
 }

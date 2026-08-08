@@ -612,11 +612,20 @@ signal_reason_is_actionable() {  # <file> ...
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
+#   done    - the reconciler confirms the crew's current state is a genuinely
+#             COMPLETED terminal state (state: done - a passed/checks-passed run
+#             or a completed no-run crew). A completed crew whose endpoint has
+#             gone idle or agent-free is EXPECTED, not a wedge, and its done:
+#             transition is delivered by the signal and heartbeat paths, so the
+#             stale-pane backstop absorbs it instead of re-surfacing. Distinct
+#             from failed (surface for delivery) and parked/blocked (actionable).
+#   none    - none of the above, so the wake must surface (a stopped/parked/
+#             failed/torn-down/unknown crew, or an unreadable verdict).
+# One fm-crew-state.sh read serves every absorb reason at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# that appended paused: but then STARTED a run reports working, never paused, and
+# a crew whose stale status log still shows needs-decision but whose run finished
+# reports done, never a re-surfaced gate.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
@@ -627,11 +636,22 @@ crew_absorb_class() {  # <id>
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = "done" ]; then printf 'done'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+# 0 if crew <id>'s authoritative current state is a genuinely completed terminal
+# state (crew_absorb_class reports `done`). The stale-pane terminal path uses this
+# so terminal completed work whose old endpoint has gone idle or agent-free is not
+# re-surfaced as a possible wedge on top of the signal/heartbeat paths that own
+# delivering its done: transition. Terminal truth comes from the reconciler here,
+# never inferred from the last status event.
+crew_is_terminal_done() {  # <id>
+  [ "$(crew_absorb_class "$1")" = "done" ]
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

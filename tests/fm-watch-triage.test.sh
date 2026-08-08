@@ -281,10 +281,11 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
 }
 
-# crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
-# reasons - working (active run/busy pane), paused (declared external wait), or none
-# (surface it) - so the watcher's stale path gets both for one bounded call.
-# crew_is_paused delegates to it exactly as crew_is_provably_working does.
+# crew_absorb_class: the single fm-crew-state.sh read that returns every absorb
+# reason - working (active run/busy pane), paused (declared external wait), done
+# (a genuinely completed terminal state), or none (surface it) - so the watcher's
+# stale path gets them all for one bounded call. crew_is_paused, crew_is_terminal_done,
+# and crew_is_provably_working all delegate to it.
 test_crew_absorb_class_classifier() {
   local dir fakebin
   dir=$(make_case absorb-class); fakebin="$dir/fakebin"
@@ -298,14 +299,32 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  ! crew_is_terminal_done a || fail "a paused crew was classed terminal done"
+  # A genuinely completed terminal state (state: done) is its own absorb class -
+  # a passed/checks-passed run whose endpoint has gone idle is expected, not a
+  # wedge - and is distinct from working, so it never reads as provably working.
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  [ "$(crew_absorb_class a)" = "done" ] || fail "completed run-step not classed done"
+  crew_is_terminal_done a || fail "crew_is_terminal_done did not recognize a done verdict"
+  ! crew_is_provably_working a || fail "a done crew was treated as provably working"
+  ! crew_is_paused a || fail "a done crew was classed paused"
+  # failure delivery and actionable gates must still surface, never absorb as done.
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_absorb_class a)" = none ] || fail "failed run classed absorbable"
+  ! crew_is_terminal_done a || fail "a failed crew was classed terminal done"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_absorb_class a)" = none ] || fail "parked gate classed absorbable"
+  ! crew_is_terminal_done a || fail "a parked crew was classed terminal done"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
+  ! crew_is_terminal_done a || fail "unknown crew classed terminal done"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  ! crew_is_terminal_done "" || fail "empty id classed terminal done"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/paused/done/none from one read; only a completed run is done, failed and parked still surface"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -454,6 +473,54 @@ test_terminal_stale_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
+}
+
+# --- stale pane, terminal status, reconciler reports COMPLETED: absorbed --------
+# The operational-acknowledgement spam guard (issue: a burst of terminal or long-idle
+# task notifications produced dozens of visible acknowledgement rows). A genuinely
+# completed crew (state: done - a passed/checks-passed run) whose old endpoint has
+# gone idle or agent-free must NOT re-surface a pane-stale wake on top of the signal
+# and heartbeat paths that already own delivering its done: transition: a completed
+# crew's quiet pane is expected, not a wedge. Terminal truth comes from the reconciler
+# (crew_absorb_class == done), never the captain-relevant last status event; no wedge
+# timer is armed because a completed crew cannot wedge; and the status line is not
+# marked surfaced because the stale-pane path does not own its delivery. Contrast
+# test_terminal_stale_surfaced (reconciler unknown/torn-down still surfaces) and the
+# active-run override above (working absorbs WITH a wedge timer).
+test_terminal_completed_stale_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-completed-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-shipped"
+  printf 'finished, awaiting review' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/shipped.meta"
+  printf 'done: PR https://example.test/pr/7 checks green\n' > "$state/shipped.status"
+  sig=$(seen_sig "$state/shipped.status"); printf '%s' "$sig" > "$state/.seen-shipped_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The reconciler reports the run genuinely completed; the captain-relevant done:
+  # log line is a terminal event, not proof the pane-stale wake must fire again.
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+
+  # A normal (not raised) escalation threshold: a completed crew still absorbs
+  # because no wedge timer is armed for it, unlike a provably-working stale.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a stale pane on a genuinely completed crew (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "the completed-crew stale printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "the completed-crew stale enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on completed absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a completed crew must not arm a wedge timer"
+  [ ! -e "$state/.hb-surfaced-shipped" ] || fail "an absorbed completed stale must not mark the status line as surfaced"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale pane on a terminal completed crew (reconciler done) is absorbed without a wedge timer"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -1813,6 +1880,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_terminal_completed_stale_absorbed
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

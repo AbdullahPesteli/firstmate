@@ -13,8 +13,10 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, canonically classified Firstmate operational user rows, and the single no-action acknowledgement row that answers one.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+When an operational input's specific event needs no action but still requires a reply, Firstmate answers with the exact routine acknowledgement AGENTS.md section 9 defines, and Calm collapses that assistant row to zero height as well, so a burst of terminal or long-idle notifications cannot accumulate visible acknowledgement rows.
+That collapse is bound to the typed operational-input provenance and the exact acknowledgement text together, never the text alone: a captain-authored message, a real outcome such as a PR URL, a decision, a failure, and any superficially similar sentence in ordinary conversation all stay visible, as does the acknowledgement whenever Calm is off or in stock `/export` and `/share` rendering.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
@@ -43,7 +45,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, the operational-input provenance, and the acknowledgement literal; `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter and records that provenance; `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns the collapsed-thinking adapter and the acknowledgement-row collapse; and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
 
 Regression entry points:
 

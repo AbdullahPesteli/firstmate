@@ -760,6 +760,13 @@ const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Da
 extension.default(pi);
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
+// The canonical (query-string-free) visibility module instance the loaded
+// extension's presentation adapters actually share, so this fixture can drive
+// the same export flag the /export path toggles and observe the adapters react.
+const canonicalVisibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+if (canonicalVisibility.FIRSTMATE_OPERATIONAL_ACK !== "Captain, shipshape.") {
+  throw new Error(`operational acknowledgement literal drifted from AGENTS.md section 9: ${canonicalVisibility.FIRSTMATE_OPERATIONAL_ACK}`);
+}
 
 // Registration is gated on config/calm at load (see fm-calm.ts's file header); this
 // fixture has no config/calm file, so nothing is registered yet. Every render-
@@ -827,6 +834,10 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  // Pi 0.81.1+ constructs the ordinary user row with the mode's markdown
+  // transformers; the fallthrough (non-operational) user path calls this, so the
+  // InteractiveMode stand-in must supply it exactly like the real seam.
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -1189,6 +1200,45 @@ for (const nearMiss of operationalNearMisses) {
     throw new Error(`Calm hid an operational near miss: ${nearMiss.visible}`);
   }
 }
+// --- routine operational-acknowledgement collapse (Calm on) ----------------
+// Calm collapses ONLY the exact no-action "Captain, shipshape." reply AGENTS.md
+// section 9 defines, and ONLY when it answers a typed operational input. It is
+// bound to that operational provenance, so the same text after a captain message
+// stays visible, a real operational outcome stays visible, and a superficially
+// similar sentence stays visible. The provenance is set by the same
+// addMessageToChat seam the operational-user row adapter already patches.
+const OPERATIONAL_ACK = "Captain, shipshape.";
+const ackAssistant = (text) => ({ ...assistantBase, content: [{ type: "text", text }] });
+const operationalWatcherContent = [{ type: "text", text: watcherMessage }];
+const assistantAfter = (userContent, assistantText) => {
+  InteractiveMode.prototype.addMessageToChat.call(operationalMode, { role: "user", content: userContent });
+  return new AssistantMessageComponent(ackAssistant(assistantText), true);
+};
+const collapsedAck = assistantAfter(operationalWatcherContent, OPERATIONAL_ACK);
+if (collapsedAck.render(100).length !== 0) {
+  throw new Error(`Calm did not collapse the routine operational acknowledgement: ${JSON.stringify(collapsedAck.render(100))}`);
+}
+const genuineAck = assistantAfter("GENUINE_CAPTAIN_MESSAGE_E2E", OPERATIONAL_ACK);
+if (!genuineAck.render(100).join("\n").includes(OPERATIONAL_ACK)) {
+  throw new Error("Calm hid a Captain, shipshape. reply to a genuine captain message");
+}
+const operationalOutcome = assistantAfter(operationalWatcherContent, "Captain, PR https://example.test/pr/9 checks green.");
+if (!operationalOutcome.render(100).join("\n").includes("https://example.test/pr/9")) {
+  throw new Error("Calm hid a real operational outcome instead of only the no-action acknowledgement");
+}
+const nearMissAck = assistantAfter(operationalWatcherContent, "Captain, shipshape!");
+if (!nearMissAck.render(100).join("\n").includes("Captain, shipshape!")) {
+  throw new Error("Calm hid a superficially similar sentence instead of the exact acknowledgement");
+}
+// Stock export/share rendering shows the collapsed acknowledgement in full.
+canonicalVisibility.setCalmStockExportRendering(true);
+if (!collapsedAck.render(100).join("\n").includes(OPERATIONAL_ACK)) {
+  throw new Error("Stock export rendering hid the operational acknowledgement row");
+}
+canonicalVisibility.setCalmStockExportRendering(false);
+if (collapsedAck.render(100).length !== 0) {
+  throw new Error("Clearing export rendering did not re-collapse the operational acknowledgement under Calm");
+}
 for (const { name, actual } of rows) {
   if (actual.render(100).length !== 0) {
     throw new Error(`${name} was not hidden before export rendering`);
@@ -1289,6 +1339,9 @@ if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expected
 }
 if (!legacyOperationalComponent.render(100).join("\n").includes("legacy presentation compatibility")) {
   throw new Error("turning Calm off did not restore the supported legacy operational row");
+}
+if (!collapsedAck.render(100).join("\n").includes(OPERATIONAL_ACK)) {
+  throw new Error("turning Calm off did not restore the routine operational acknowledgement row");
 }
 for (const { name, baseline, actual } of rows) {
   if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {

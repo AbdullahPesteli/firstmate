@@ -58,6 +58,7 @@ import {
   calmPresentationHides,
   calmPresentationIsActive,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
+  noteFirstmateOperationalUserProvenance,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -390,6 +391,10 @@ export default function (pi: ExtensionAPI) {
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
+    // A new or reloaded session rebuilds every row from scratch; start from
+    // genuine provenance so the first restored user message, not a prior
+    // session's residue, decides the next assistant row's acknowledgement bind.
+    noteFirstmateOperationalUserProvenance(false);
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;

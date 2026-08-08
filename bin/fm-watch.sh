@@ -18,9 +18,15 @@
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
+#                          firstmate hands it to a no-mistakes validation. A crew the
+#                          reconciler reports as genuinely COMPLETED (state: done) is
+#                          absorbed outright even on a captain-relevant terminal log
+#                          line: its endpoint going idle or agent-free is expected,
+#                          and its done: transition is delivered by the signal and
+#                          heartbeat paths, so re-surfacing a pane-stale wake would
+#                          only duplicate it - failed/parked/blocked still surface. A
+#                          declared external-wait pause is absorbed instead with its
+#                          own long re-surface cadence, never as a wedge. Only when no
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -982,21 +988,36 @@ EOF
           # poll. Root cause of the 2026-07 herdr false-surface incidents: a
           # validating crew was surfaced as stale every few minutes despite an
           # actively-running pipeline, purely because of this stale leftover
-          # line. On a NEW hash, give an active run/busy pane (the same
-          # authoritative source fm-crew-state.sh itself already prioritizes
-          # over the log) a chance to override before trusting the log.
+          # line. On a NEW hash, ask the reconciler (the same authoritative
+          # source fm-crew-state.sh itself already prioritizes over the log)
+          # for one verdict before trusting the log: an active run/busy pane
+          # overrides it, and a genuinely COMPLETED terminal state is absorbed
+          # outright because a done crew whose endpoint has gone idle or
+          # agent-free is expected, not a wedge, and its done: transition is
+          # already delivered by the signal/heartbeat paths - re-surfacing a
+          # pane-stale wake on top of that is the operational-acknowledgement
+          # spam this guards against. Only a failed/parked/blocked/unknown
+          # verdict still surfaces (failure delivery and actionable gates).
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
-            fi
+            case "$(crew_absorb_class "$(window_to_task "$w" "$STATE")")" in
+              working)
+                printf '%s' "$h" > "$sf"
+                date +%s > "$ssf"
+                triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                ;;
+              done)
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf" "$ewf"
+                triage_log "absorbed stale (terminal completed, endpoint idle/agent-free): $w"
+                ;;
+              *)
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+                wake "stale: $w"
+                ;;
+            esac
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way

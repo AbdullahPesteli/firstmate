@@ -306,4 +306,45 @@ assert_absent "$STATE_DIR/ff-instfail.json" "a failed install must leave no sess
 ls -d "$STATE_DIR"/profile.ff-instfail.* >/dev/null 2>&1 && fail "a failed install must leave no profile directory"
 pass "an extension install failure is cleaned up with no leftovers"
 
+# --- 8f) interruption cleanup: SIGTERM during the readiness window -----------
+# stall mode keeps the launched Firefox alive but never opens the endpoint, so
+# start sits in its readiness window with a fresh profile and a live child. A
+# SIGTERM to the start process (as a supervisor terminating a fleet worker would
+# send) must tear both down and commit nothing.
+FM_FAKE_FF_MODE=stall "$TOOL" start --session ff-sigterm --timeout 60 >/dev/null 2>&1 &
+sig_start_pid=$!
+STRAY_PIDS+=("$sig_start_pid")
+
+# Wait until the launched fake Firefox is actually running: its argv carries the
+# session profile path, which nothing else in this suite does, so its presence
+# proves we are inside the interruptible launch->commit window.
+waited=0
+sig_ff_up=0
+while [ "$waited" -lt 100 ]; do
+  if pgrep -f 'profile[.]ff-sigterm[.]' >/dev/null 2>&1; then sig_ff_up=1; break; fi
+  kill -0 "$sig_start_pid" 2>/dev/null || break
+  sleep 0.1
+  waited=$((waited + 1))
+done
+[ "$sig_ff_up" = 1 ] || fail "fake Firefox never entered the readiness window for the SIGTERM case"
+
+kill -TERM "$sig_start_pid" 2>/dev/null || true
+waited=0
+while kill -0 "$sig_start_pid" 2>/dev/null; do
+  [ "$waited" -lt 100 ] || fail "interrupted start did not exit after SIGTERM"
+  sleep 0.1
+  waited=$((waited + 1))
+done
+
+# The launched Firefox must be gone (give the in-flight teardown a beat to reap).
+waited=0
+while pgrep -f 'profile[.]ff-sigterm[.]' >/dev/null 2>&1; do
+  [ "$waited" -lt 100 ] || fail "an interrupted start left a Firefox process referencing the session profile"
+  sleep 0.1
+  waited=$((waited + 1))
+done
+ls -d "$STATE_DIR"/profile.ff-sigterm.* >/dev/null 2>&1 && fail "an interrupted start must leave no profile directory"
+assert_absent "$STATE_DIR/ff-sigterm.json" "an interrupted start must leave no session state file"
+pass "a SIGTERM during the readiness window orphans no process and leaves no profile or state"
+
 echo "ok - fm-firefox.sh hermetic command-surface behavior"

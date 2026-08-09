@@ -389,6 +389,27 @@ PY
   return 0
 }
 
+# In-flight teardown for a start that is interrupted or fails before its session
+# is committed: kill the Firefox we launched (only when the recorded pid is still
+# our own, proven by profile path via ff_pid_is_our_firefox) and remove the fresh
+# profile we created under the state root. Bound to INT/TERM/ERR from just after
+# launch until the state file is written, then cleared, so an interrupted start
+# never orphans a process or leaves a profile/state behind, while a signal after
+# commit never tears down a live, recorded session.
+ff_start_abort() { # exit_code
+  trap - INT TERM ERR
+  local code=${1:-1}
+  if [ -n "${pid:-}" ] && ff_pid_is_our_firefox "$pid" "${profile:-}"; then
+    ff_kill_pid "$pid" || true
+  fi
+  if [ -n "${profile:-}" ] && [ -n "${state_dir:-}" ]; then
+    case "$profile" in
+      "$state_dir"/profile.*) rm -rf "$profile" ;;
+    esac
+  fi
+  exit "$code"
+}
+
 ff_cmd_start() {
   local session="" label="" extension="" system_access=0 headless=1 port="" timeout=$FM_FIREFOX_DEFAULT_TIMEOUT
   local -a env_pairs=() cookie_pairs=()
@@ -478,6 +499,12 @@ ff_cmd_start() {
   pid=$!
   disown 2>/dev/null || true
 
+  # Until the session is committed, any interruption or unexpected failure must
+  # tear down the process and profile we just created (ff_start_abort).
+  trap 'ff_start_abort 130' INT
+  trap 'ff_start_abort 143' TERM
+  trap 'ff_start_abort $?' ERR
+
   # Bounded readiness wait; on failure, clean up everything we created.
   local deadline waited=0 ready=0
   deadline=$((timeout * 4)) # 0.25s ticks
@@ -516,6 +543,8 @@ ff_cmd_start() {
     FF_EXT_PATH="$extension" FF_EXT_INSTALLED="$ext_installed" FF_EXT_ID="$ext_id" \
     FF_ENV_KEYS="$env_keys" FF_COOKIE_OFF_KEYS="$cookie_keys" \
     ff_emit_receipt "$py" | tee "$state_file" >/dev/null
+  # Session is committed; a later signal must not tear down a recorded session.
+  trap - INT TERM ERR
   chmod 600 "$state_file" 2>/dev/null || true
   cat "$state_file"
   return 0

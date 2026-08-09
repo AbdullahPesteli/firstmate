@@ -137,6 +137,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/firefox-marionette/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -249,6 +253,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/firefox-marionette.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
@@ -330,6 +338,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/firefox-marionette.md",
       "audience": "maintainer-verification"
     },
     {

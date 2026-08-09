@@ -147,6 +147,83 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_herdr_stub <dir>: add a fake `herdr` binary to the case's fakebin, so a
+# herdr-backed task can be driven without the real multiplexer. It models only
+# the four subcommands the exit path reads, as a small state machine over
+# $FM_FAKE_DIR: `status` reports a running server, `pane get` a present pane,
+# `agent get` an agent whose full-lifecycle (herdr:pi, screen_detection_skipped)
+# status is `blocked` - which the reader maps to authoritative idle - until an
+# interrupt key is delivered, after which it reports agent_not_found. Every key
+# is recorded to $FM_FAKE_DIR/keys exactly like the tmux stub, and
+# FM_FAKE_INTERRUPT_STOPS_AGENT makes the interrupt retire the agent.
+make_herdr_stub() {  # <dir>
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  status) printf '{"server":{"running":true}}\n'; exit 0 ;;
+  pane)
+    case "${2:-}" in
+      get) printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"; exit 0 ;;
+      send-keys)
+        key=${4:-}
+        printf '%s\n' "$key" >> "$D/keys"
+        if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
+           && { [ "$key" = escape ] || [ "$key" = ctrl+c ]; }; then
+          : > "$D/herdr-agent-gone"
+        fi
+        exit 0 ;;
+    esac
+    exit 0 ;;
+  agent)
+    case "${2:-}" in
+      get)
+        if [ -e "$D/herdr-agent-gone" ]; then
+          printf '{"error":{"code":"agent_not_found"}}\n'
+        else
+          printf '{"result":{"agent":{"agent":"fm-agent","agent_status":"blocked","screen_detection_skipped":true,"agent_session":{"source":"herdr:pi"}}}}\n'
+        fi
+        exit 0 ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
+# add_herdr_task <case-dir> <id> <harness>: like add_task, but records a herdr
+# endpoint (window=<session>:<pane>) so lifecycle verbs resolve the herdr
+# backend and drive the fake herdr binary.
+add_herdr_task() {  # <case-dir> <id> <harness>
+  local dir=$1 id=$2 harness=$3
+  local home="$dir/home" proj="$dir/proj-$id" wt="$dir/wt-$id"
+  local session=fmlab workspace=w1 tab=w1:t2 pane=w1:p2
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  mkdir -p "$home/data/$id"
+  printf '# brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  {
+    echo "window=$session:$pane"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=$harness"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "backend=herdr"
+    echo "herdr_session=$session"
+    echo "herdr_workspace_id=$workspace"
+    echo "herdr_tab_id=$tab"
+    echo "herdr_pane_id=$pane"
+  } > "$home/state/$id.meta"
+}
+
 # new_case <name> -> echoes a case dir holding home/, fake/, and fakebin.
 new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
@@ -767,6 +844,32 @@ test_exit_accepts_agent_stopped_by_busy_interrupt() {
   pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
 }
 
+test_conflict_verdict_is_interrupted_before_the_exit_command() {
+  local dir out rc gen
+  dir=$(new_case conflict)
+  make_herdr_stub "$dir"
+  add_herdr_task "$dir" t1 pi
+  # The reconciliation incident: a Pi worker's stale busy record (an agent-start
+  # seed whose settle never landed, e.g. a /reload) that the herdr:pi
+  # full-lifecycle integration authoritatively contradicts as idle yields a
+  # `conflict` verdict, not `busy`. The exit gate must still interrupt first -
+  # the fake herdr retires the agent the instant the cancel key lands, proving
+  # the interrupt reached the pane before any exit command was typed.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 busy \
+    --gen "$gen" --source pi-ext --event agent-start
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a conflict-verdict agent should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "escape" ] \
+    || fail "a conflict verdict must be interrupted before exit, got keys: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] \
+    || fail "the interrupt already stopped the agent, so no exit command should be typed, got: $(literals "$dir")"
+  assert_contains "$out" "stopped t1 harness=pi backend=herdr" \
+    "a conflict-verdict agent stopped by the pre-exit interrupt completes exit"
+  pass "fm-control exit: a conflict verdict is interrupted before the exit command"
+}
+
 test_agent_that_does_not_stop_fails_closed() {
   local dir out rc gen
   dir=$(new_case stubborn)
@@ -890,6 +993,7 @@ test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
+test_conflict_verdict_is_interrupted_before_the_exit_command
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation

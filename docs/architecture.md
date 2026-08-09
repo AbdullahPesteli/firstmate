@@ -101,7 +101,7 @@ Text for a worker to read and commands that drive a worker's process are separat
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
-Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
+Every classification returns a verdict of busy, idle, unknown, dead, or conflict together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, and Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks.
 Kimi behind Pi inherits Pi's lifecycle.
@@ -127,6 +127,7 @@ Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
 `fm-watch.sh` decides each window's busy state through the semantic contract above rather than by polling the backend for rendered text.
 Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no record of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
+A verified full-lifecycle integration (such as `herdr:pi`) is the one exception: its idle is turn-state authoritative and reconciles a stale busy record into a `conflict` verdict instead of being trusted as still-busy, as [herdr-backend.md](herdr-backend.md#current-transport-behavior) owns.
 tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task on those backends is classified purely from its adapter's own lifecycle record.
 That poll loop is still the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.

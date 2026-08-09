@@ -2342,29 +2342,121 @@ EOF
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state: "agent_start" -> busy when a low-level agent run begins;
-// "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
-// continue automatically - auto-retries, auto-compaction retries, tool
-// loops, and queued continuations all keep the run un-settled, and a settle
-// that raced another extension's fresh run keeps state busy via isIdle().
-// "turn_end" fires at every inner turn boundary (one LLM response plus its
-// tool calls) and stays a wake NOTIFICATION touch for the watcher, never
-// current-state truth.
+// Firstmate semantic busy-state events + turn-end notification + question wait
+// signal; written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+//
+// Turn lifecycle (busy-state record via fm-busy-event.sh, source pi-ext):
+//   agent_start   -> busy   a low-level agent run began.
+//   agent_settled -> idle   only when ctx.isIdle() confirms Pi will not continue
+//                           automatically - auto-retries, auto-compaction retries,
+//                           tool loops, and queued continuations keep the run
+//                           un-settled, and a settle that raced another
+//                           extension's fresh run stays busy via isIdle().
+//   session_start(reason != "startup") -> reconcile from ctx.isIdle(). A /reload
+//                           or other session replacement re-loads this extension
+//                           WITHOUT a paired agent_start/agent_settled for the
+//                           pre-existing run (Pi 0.84.1 emits session_shutdown
+//                           then session_start reason=reload with no agent_settled),
+//                           so a reload that lands while the record is busy but the
+//                           agent is actually idle would otherwise leave a
+//                           permanently stale busy record. reason "startup" is
+//                           skipped: the arm already seeded busy for the launch
+//                           brief and agent_start follows. Mirrors the herdr:pi
+//                           integration's own session_start reconciliation.
+// Every apply is serialized through one in-process queue so two events firing
+// close together can never be applied to the record out of order.
+//
+// turn_end stays a wake NOTIFICATION touch for the watcher, never current state.
+//
+// herdr:blocked: Pi 0.84.1 exposes no generic dialog lifecycle event and no
+// installed package emits the shared herdr:blocked event the herdr pi integration
+// listens for, so an interactive question/approval wait (ctx.ui confirm/select/
+// input/editor/custom, including MCP tool approval and elicitation) is invisible
+// to both herdr and firstmate while full-lifecycle authority suppresses herdr
+// screen detection. ctx.ui is ONE shared object for every extension and tool in
+// the session, so wrapping its dialog methods is the single truthful integration
+// point: it emits herdr:blocked(active) exactly while a real dialog is open and
+// clears it when the dialog resolves, cancels, or throws. Only a non-sensitive
+// category label (the method name) ever leaves the worker UI - never the title,
+// body, arguments, or entered values. Detection and relay only; the question is
+// never answered here.
 import { execFile } from "node:child_process";
-const busyEvent = (state: string, event: string) =>
+const applyBusy = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
+let busyInFlight = false;
+const busyQueue: Array<[string, string, () => void]> = [];
+async function drainBusyQueue(): Promise<void> {
+  if (busyInFlight) return;
+  busyInFlight = true;
+  try {
+    while (busyQueue.length) {
+      const next = busyQueue.shift();
+      if (next) { await applyBusy(next[0], next[1]); next[2](); }
+    }
+  } finally {
+    busyInFlight = false;
+    if (busyQueue.length) void drainBusyQueue();
+  }
+};
+// Serialize every apply through one queue so two events firing close together
+// can never be applied out of order; the returned promise resolves when THIS
+// event's apply has landed so a handler can await it.
+const busyEvent = (state: string, event: string): Promise<void> =>
+  new Promise<void>((resolve) => {
+    busyQueue.push([state, event, resolve]);
+    void drainBusyQueue();
+  });
+const paneIdle = (ctx: any): boolean | undefined => {
+  if (!ctx || typeof ctx.isIdle !== "function") return undefined;
+  try { return ctx.isIdle() === true; } catch { return undefined; }
+};
+const emitBlocked = (pi: any, active: boolean, label: string) => {
+  try { pi.events?.emit?.("herdr:blocked", { active, label }); } catch {}
+};
+const DIALOG_METHODS = ["confirm", "select", "input", "editor", "custom"];
+const wrapDialogs = (pi: any, ui: any) => {
+  if (!ui || ui.__fmBlockedWrapped) return;
+  for (const method of DIALOG_METHODS) {
+    const original = ui[method];
+    if (typeof original !== "function") continue;
+    ui[method] = function (this: any, ...args: any[]) {
+      emitBlocked(pi, true, method);
+      let cleared = false;
+      const clear = () => { if (!cleared) { cleared = true; emitBlocked(pi, false, method); } };
+      let result: any;
+      try {
+        result = original.apply(this, args);
+      } catch (err) {
+        clear();
+        throw err;
+      }
+      if (result && typeof result.then === "function") {
+        return result.then((v: any) => { clear(); return v; }, (e: any) => { clear(); throw e; });
+      }
+      clear();
+      return result;
+    };
+  }
+  try { Object.defineProperty(ui, "__fmBlockedWrapped", { value: true, enumerable: false }); }
+  catch { ui.__fmBlockedWrapped = true; }
+};
 export default function (pi: any) {
-  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("agent_start", (_event: any, ctx: any) => { wrapDialogs(pi, ctx?.ui); return busyEvent("busy", "agent-start"); });
   pi.on("agent_settled", (_event: any, ctx: any) => {
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    if (paneIdle(ctx) === false) return;
     return busyEvent("idle", "agent-settled");
+  });
+  pi.on("session_start", (event: any, ctx: any) => {
+    wrapDialogs(pi, ctx?.ui);
+    if (!event || event.reason === "startup") return;
+    const idle = paneIdle(ctx);
+    if (idle === true) return busyEvent("idle", "session-reconcile");
+    if (idle === false) return busyEvent("busy", "session-reconcile");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }

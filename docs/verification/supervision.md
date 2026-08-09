@@ -176,6 +176,30 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+### Herdr full-lifecycle idle reconciliation and Pi reload (2026-08-09)
+
+Verified against Pi `0.84.1` and Herdr `0.8.0` with its current official Pi integration v8 (`~/.pi/agent/extensions/herdr-agent-state.ts`, `HERDR_INTEGRATION_VERSION=8`), all in a named non-default Herdr lab session so the live `default` fleet was untouched (fleet-state tripwire equal before and after each run).
+
+Root cause of the stale busy record: on `/reload` Pi emits `session_shutdown` reason `reload`, re-loads the per-task extension, then emits `session_start` reason `reload` with `ctx.isIdle()` already `true` and no paired `agent_settled`.
+Captured in a pty-driven `pi -e <ext>` session:
+
+```
+session_shutdown reason=reload
+EXT_LOADED
+session_start reason=reload mode=tui isIdle=true
+```
+
+The previous generated extension had no `session_start` handler, so a reload that landed while the record was `busy source=pi-ext event=agent-start` left it stale forever while `herdr:pi` recovered to idle via its own `session_start` reconciliation.
+The current generated extension reconciles on any non-`startup` `session_start` from `ctx.isIdle()`; the lab observed the recovery event `state=idle source=pi-ext event=session-reconcile` and, on a clean turn, `working -> idle` in both `herdr agent get` and `state/<id>.busy-state`.
+
+Authority signal: `herdr agent get <pane>` for the lab's Pi worker returned `agent_status: idle`, `screen_detection_skipped: true`, and `agent_session.source: herdr:pi`, which `fm_backend_herdr_authoritative_state` requires before letting an idle observation override a busy record.
+A screen-detected or generic agent has neither field, so a long foreground tool call still classifies busy.
+
+Question/approval waits: Pi 0.84.1 exposes no generic dialog lifecycle event on the extension bus (its full event set has no `ui`/`dialog`/`tool_approval` event), and no installed Pi package emits the `herdr:blocked` event the Pi integration listens for.
+A lab dialog that blocks a turn on `ctx.ui.confirm` was invisible without the fix (`herdr agent get` read `idle` for the whole wait); with the per-task extension's `ctx.ui` wrapper loaded, the same dialog drove `herdr agent get` to `blocked`, which the transition policy escalates as actionable.
+Only the method-name label leaves the worker UI; the dialog title and body never appear in the emitted event.
+The robust upstream fix would be Pi (or `pi-mcp-adapter`) emitting `herdr:blocked` itself, or Pi exposing a generic dialog lifecycle event; wrapping the shared `ctx.ui` object is the strongest safe local detection until then and covers every `ctx.ui` dialog without patching installed packages or reading question wording.
+
 ## Turn-end guard
 
 The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.

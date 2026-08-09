@@ -2982,6 +2982,43 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
+# --- authoritative_state (full-lifecycle-only agent state) --------------------
+
+test_authoritative_state_full_lifecycle_idle() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/auth-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle","screen_detection_skipped":true,"agent_session":{"source":"herdr:pi"}}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_authoritative_state default:w1:p2' "$ROOT" )
+  [ "$out" = idle ] || fail "full-lifecycle herdr:pi idle should be authoritative idle, got '$out'"
+  pass "fm_backend_herdr_authoritative_state: screen_detection_skipped + herdr:pi source -> authoritative idle"
+}
+
+test_authoritative_state_screen_detected_is_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/auth-screen"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Screen-detected agent: no lifecycle source and detection not skipped.
+  printf '{"result":{"agent":{"agent_status":"idle","screen_detection_skipped":false,"agent_session":{"source":""}}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_authoritative_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "screen-detected idle must NOT be authoritative, got '$out'"
+  pass "fm_backend_herdr_authoritative_state: screen-detected idle is unknown (conservative rule preserved)"
+}
+
+test_authoritative_state_skipped_without_lifecycle_source_is_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/auth-nosource"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Detection skipped for a non-lifecycle reason (e.g. launch pending) with no source.
+  printf '{"result":{"agent":{"agent_status":"idle","screen_detection_skipped":true,"agent_session":{"source":""}}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_authoritative_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "skipped detection without a lifecycle source must not be authoritative, got '$out'"
+  pass "fm_backend_herdr_authoritative_state: detection-skipped without a herdr lifecycle source is unknown"
+}
+
 # --- composer_state: structural border-row classification --------------------
 
 test_composer_state_bare_prompt_is_empty() {
@@ -4316,6 +4353,9 @@ test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_authoritative_state_full_lifecycle_idle
+test_authoritative_state_screen_detected_is_unknown
+test_authoritative_state_skipped_without_lifecycle_source_is_unknown
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending

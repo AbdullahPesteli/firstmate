@@ -41,18 +41,28 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
 #   malformed, gen-mismatch, source-mismatch, kimi-unverified,
-#   codex-unverified, capture-failed, no-target
+#   codex-unverified, capture-failed, no-target,
+#   <backend>-idle-stale-busy (the conflict verdict below)
 #
-# Classification (fm_busy_classify): busy | idle | unknown | dead, always
-# with the producing source as the second token. Precedence:
+# Classification (fm_busy_classify): busy | idle | unknown | dead | conflict,
+# always with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
+#   3. a valid, gen-matching, source-trusted record; EXCEPT a busy record that a
+#      verified full-lifecycle backend integration contradicts with a live idle
+#      observation is stale and yields `conflict <backend>-idle-stale-busy`
+#      (fm_backend_authoritative_state; the reader never reports that as busy,
+#      it reconciles against the task's terminal result). Otherwise the record's
+#      own state and source.
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log pull source, then the Grok-only temporary regex fallback
 #      classifies a grok task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
+# The conflict verdict is the ONLY place a valid record is overridden, and only
+# by an authoritative lifecycle idle - never by a fixed busy TTL, and never for
+# screen-detected / generic / non-lifecycle backends (they return unknown, so a
+# long foreground tool call that reads idle can never force a false conflict).
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -632,11 +642,30 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     r_state=${out%% *}
     out=${out#* }
     r_source=${out%% *}
-    if fm_busy_source_trusted "$harness" "$r_source"; then
-      printf '%s %s' "$r_state" "$r_source"
-    else
+    if ! fm_busy_source_trusted "$harness" "$r_source"; then
       printf 'unknown source-mismatch'
+      return 0
     fi
+    # Authoritative reconciliation: a valid busy record that a VERIFIED
+    # full-lifecycle backend integration contradicts with a live idle
+    # observation is stale (e.g. a Pi /reload replaced the per-task extension
+    # mid-run so the settle was never recorded). Never report that as busy:
+    # emit a deterministic conflict verdict so the current-state reader
+    # reconciles it against the task's terminal result instead of trusting the
+    # stale record. fm_backend_authoritative_state returns unknown for
+    # screen-detected / generic / non-lifecycle backends, so the conservative
+    # rule (a long foreground tool call can read idle) is preserved and no
+    # fixed busy TTL is used - only the authoritative lifecycle observation
+    # triggers the contradiction.
+    if [ "$r_state" = busy ] && command -v fm_backend_authoritative_state >/dev/null 2>&1; then
+      local auth
+      auth=$(fm_backend_authoritative_state "$backend" "$target" 2>/dev/null || true)
+      if [ "$auth" = idle ]; then
+        printf 'conflict %s-idle-stale-busy' "$backend"
+        return 0
+      fi
+    fi
+    printf '%s %s' "$r_state" "$r_source"
     return 0
   fi
   case "$out" in

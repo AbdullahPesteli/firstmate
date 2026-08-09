@@ -2901,6 +2901,35 @@ fm_backend_herdr_busy_state() {  # <target>
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
 }
 
+# fm_backend_herdr_authoritative_state: the busy|idle|unknown verdict from
+# herdr's agent-state ONLY when it is owned by a verified full-lifecycle
+# integration (e.g. herdr:pi), where idle and blocked are turn-state
+# authoritative rather than a screen-detection guess. Herdr reports
+# screen_detection_skipped=true together with an agent_session.source that names
+# the lifecycle integration exactly when that integration holds full-lifecycle
+# authority; a screen-detected or generic agent has neither. Every other case -
+# a missing/unreadable read, screen-detected status, or an unknown source -
+# returns unknown, so the caller keeps the conservative rule that a generic idle
+# is NOT trusted (a long foreground tool call reads idle). This is the reader
+# side of the authoritative idle-vs-stale-busy reconciliation; the writer side
+# is the per-task Pi extension's session_start reconciliation. Verified against
+# herdr 0.8.0 + pi integration v8 (docs/verification/supervision.md).
+fm_backend_herdr_authoritative_state() {  # <target>
+  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  local out skipped source status
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  skipped=$(printf '%s' "$out" | jq -r '.result.agent.screen_detection_skipped // empty' 2>/dev/null)
+  source=$(printf '%s' "$out" | jq -r '.result.agent.agent_session.source // empty' 2>/dev/null)
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  case "$source" in
+    herdr:*) : ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  [ "$skipped" = true ] || { printf 'unknown'; return 0; }
+  fm_backend_herdr_classify_agent_status "$status"
+}
+
 # fm_backend_herdr_wait_for_working: poll <session>:<pane_id>'s NATIVE
 # agent-state (agent get) up to <polls> times spread evenly across
 # <budget-seconds>, returning on stdout the STRONGEST signal observed:

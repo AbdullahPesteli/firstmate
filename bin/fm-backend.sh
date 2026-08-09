@@ -793,6 +793,22 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_authoritative_state: busy|idle|unknown from a backend's VERIFIED
+# full-lifecycle integration only (not screen detection or pane-regex). The
+# busy-state contract (bin/fm-busy-lib.sh) uses this to reconcile a stale
+# firstmate busy record against an authoritative live lifecycle observation.
+# Backends without such an integration return unknown, so their behavior is
+# unchanged.
+fm_backend_authoritative_state() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_authoritative_state "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

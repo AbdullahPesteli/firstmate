@@ -314,6 +314,93 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+# --- authoritative full-lifecycle idle vs stale busy record -------------------
+# The exact incident: a Pi /reload replaced the per-task extension mid-run so
+# the settle was never recorded, leaving a stale pi-ext busy record, while
+# herdr's full-lifecycle herdr:pi integration authoritatively reports idle.
+
+test_authoritative_idle_conflicts_stale_busy() {
+  local state gen out
+  state=$(new_state_dir auth-conflict)
+  gen=$("$EV" arm "$state" t1)
+  # Stale busy record exactly as the incident left it (seq=2 pi-ext agent-start).
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_authoritative_state() { printf 'idle'; }
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  [ "$out" = "conflict herdr-idle-stale-busy" ] \
+    || fail "authoritative idle over a stale busy record must yield the conflict verdict, got '$out'"
+  # The boolean view must never read the conflict as busy.
+  if fm_busy_is_busy herdr s:p pi t1 "$state"; then
+    fail "a conflict verdict must not read as busy"
+  fi
+  unset -f fm_backend_authoritative_state
+  pass "authoritative full-lifecycle idle over a stale busy record yields a conflict, never busy"
+}
+
+test_authoritative_working_keeps_busy() {
+  local state gen out
+  state=$(new_state_dir auth-working)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  # A long foreground tool: the record is busy and the full-lifecycle
+  # integration agrees the agent is still in a turn (busy). No conflict.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_authoritative_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  [ "$out" = "busy pi-ext" ] || fail "authoritative working must keep the busy record, got '$out'"
+  unset -f fm_backend_authoritative_state
+  pass "an authoritative working observation keeps the busy record (no false conflict)"
+}
+
+test_screen_detected_idle_keeps_busy() {
+  local state gen out
+  state=$(new_state_dir auth-screen)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  # Screen-detected / generic herdr idle is NOT authoritative: the backend
+  # returns unknown, so the conservative rule (a long foreground tool can read
+  # idle) is preserved and the busy record stands.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_authoritative_state() { printf 'unknown'; }
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  [ "$out" = "busy pi-ext" ] || fail "non-authoritative idle must not override the busy record, got '$out'"
+  unset -f fm_backend_authoritative_state
+  pass "screen-detected / non-authoritative idle never forces a conflict (busy record preserved)"
+}
+
+test_authoritative_idle_only_overrides_busy() {
+  local state gen out
+  state=$(new_state_dir auth-idle-record)
+  gen=$("$EV" arm "$state" t1)
+  # An idle record with authoritative idle agrees: plain idle, not a conflict.
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event agent-settled
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_authoritative_state() { printf 'idle'; }
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  [ "$out" = "idle pi-ext" ] || fail "an idle record must stay idle, got '$out'"
+  unset -f fm_backend_authoritative_state
+  pass "the conflict override applies only to a busy record, never to an agreeing idle record"
+}
+
+test_authoritative_reconcile_scoped_to_backends() {
+  local state gen out
+  state=$(new_state_dir auth-nonherdr)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  # A backend with no full-lifecycle integration returns unknown -> no conflict,
+  # so tmux/cmux/zellij/orca behavior is unchanged.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_authoritative_state() { printf 'unknown'; }
+  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  [ "$out" = "busy pi-ext" ] || fail "a non-lifecycle backend must never conflict, got '$out'"
+  unset -f fm_backend_authoritative_state
+  # With the reconciler absent entirely, a busy record still classifies busy.
+  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  [ "$out" = "busy pi-ext" ] || fail "absent reconciler must leave the busy record intact, got '$out'"
+  pass "authoritative reconciliation is a no-op without a full-lifecycle backend integration"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -374,6 +461,11 @@ test_codex_unverified_gate
 test_kimi_unverified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_authoritative_idle_conflicts_stale_busy
+test_authoritative_working_keeps_busy
+test_screen_detected_idle_keeps_busy
+test_authoritative_idle_only_overrides_busy
+test_authoritative_reconcile_scoped_to_backends
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

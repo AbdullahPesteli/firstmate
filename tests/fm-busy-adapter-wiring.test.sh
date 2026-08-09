@@ -100,6 +100,11 @@ switch (process.env.MODE) {
     await handlers["agent_start"]({}, ctx);
     break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "session-start": {
+    const sctx = { isIdle: () => process.env.SESSION_IDLE === "1" };
+    await handlers["session_start"]({ reason: process.env.SESSION_REASON }, sctx);
+    break;
+  }
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 if (process.env.MODE === "turn-end") {
@@ -158,6 +163,178 @@ test_pi_extension_serializes_settle_before_next_start() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy pi-ext" ] || fail "a fresh agent_start after agent_settled must win, got '$out'"
   pass "pi extension awaits agent_settled before the next agent_start without a test delay"
+}
+
+# drive_pi_ext_ui <ext-path> <scenario>: load the generated Pi extension in a
+# plain Node host that provides pi.events (capturing every herdr:blocked emit)
+# and a shared ctx.ui whose dialog methods we control, then exercise a dialog
+# scenario. Prints one JSON line per herdr:blocked emit plus RESULT/ERROR lines,
+# so the test asserts the OBSERVABLE contract, never extension source bytes.
+drive_pi_ext_ui() {
+  EXT_PATH="$1" SCENARIO="$2" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+const log = [];
+const pi = {
+  on: (name, fn) => { handlers[name] = fn; },
+  events: { emit: (name, data) => { if (name === "herdr:blocked") log.push(data); } },
+};
+mod.default(pi);
+// A shared ctx.ui exactly as Pi hands the SAME object to every extension/tool.
+let resolvers = {};
+const mkDialog = (name) => (...args) => {
+  // Record the raw args so the test can prove only the method label leaks.
+  log.push({ call: name, args });
+  if (process.env.SCENARIO === "sync-throw" && name === "confirm") {
+    throw new Error("boom-" + JSON.stringify(args));
+  }
+  return new Promise((resolve, reject) => { resolvers[name] = { resolve, reject }; });
+};
+const ui = {};
+for (const m of ["confirm", "select", "input", "editor", "custom"]) ui[m] = mkDialog(m);
+const ctx = { isIdle: () => false, ui };
+// session_start installs the wrapper on the shared ui object.
+await handlers["session_start"]({ reason: "startup" }, ctx);
+// A reload re-runs the extension and re-enters session_start on the SAME ui
+// object: the wrapper must stay idempotent (no double emit per dialog).
+if (process.env.SCENARIO === "idempotent") {
+  await handlers["session_start"]({ reason: "reload" }, ctx);
+}
+
+const emit = () => log.filter((e) => e && typeof e.active === "boolean");
+const dump = () => { for (const e of emit()) process.stdout.write(JSON.stringify(e) + "\n"); };
+const calls = () => log.filter((e) => e && e.call);
+
+switch (process.env.SCENARIO) {
+  case "resolve": {
+    const p = ctx.ui.confirm("Delete production DB?", "secret-body-value");
+    process.stdout.write("AFTER_OPEN active_count=" + emit().filter(e=>e.active).length + "\n");
+    resolvers.confirm.resolve(true);
+    await p;
+    dump();
+    // Prove no sensitive text leaked into any emitted label.
+    const leaked = emit().some((e) => JSON.stringify(e).includes("secret-body-value") || JSON.stringify(e).includes("production"));
+    process.stdout.write("LEAKED=" + leaked + "\n");
+    break;
+  }
+  case "nested": {
+    const p1 = ctx.ui.confirm("outer");
+    const p2 = ctx.ui.select("inner", ["a", "b"]);
+    process.stdout.write("BOTH_OPEN actives=" + emit().filter(e=>e.active).length + "\n");
+    resolvers.select.resolve("a");
+    await p2;
+    process.stdout.write("AFTER_INNER inactives=" + emit().filter(e=>!e.active).length + "\n");
+    resolvers.confirm.resolve(true);
+    await p1;
+    dump();
+    break;
+  }
+  case "cancel-reject": {
+    const p = ctx.ui.input("name?");
+    resolvers.input.reject(new Error("cancelled"));
+    let threw = false;
+    try { await p; } catch { threw = true; }
+    process.stdout.write("REJECTED=" + threw + "\n");
+    dump();
+    break;
+  }
+  case "sync-throw": {
+    let threw = false;
+    try { ctx.ui.confirm("boom?"); } catch { threw = true; }
+    process.stdout.write("THREW=" + threw + "\n");
+    dump();
+    break;
+  }
+  case "idempotent": {
+    const p = ctx.ui.confirm("only once?");
+    resolvers.confirm.resolve(true);
+    await p;
+    process.stdout.write("ACTIVES=" + emit().filter(e=>e.active).length + " INACTIVES=" + emit().filter(e=>!e.active).length + "\n");
+    dump();
+    break;
+  }
+  default: throw new Error("unknown scenario " + process.env.SCENARIO);
+}
+EOF
+}
+
+test_pi_extension_session_start_reconciles_reload() {
+  local rec id=busy-pi-reload out state ext
+  rec=$(make_spawn_case pi-reload pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  # Drive a stale busy record (agent-start recorded, settle never delivered).
+  out=$(drive_pi_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  [ "$(classify pi "$id" "$state")" = "busy pi-ext" ] || fail "precondition: record must be busy"
+
+  # A /reload while the agent is actually idle: session_start(reason=reload)
+  # with isIdle=true must reconcile the stale busy record to idle (the incident
+  # recovery herdr:pi v8 performs and our old extension did not).
+  out=$(SESSION_REASON=reload SESSION_IDLE=1 drive_pi_ext "$ext" session-start) \
+    || fail "session-start reload-idle drive failed: $out"
+  [ "$(classify pi "$id" "$state")" = "idle pi-ext" ] \
+    || fail "session_start(reload,isIdle) must reconcile a stale busy record to idle, got '$(classify pi "$id" "$state")'"
+
+  # A reload mid-run (isIdle=false) reconciles busy.
+  out=$(SESSION_REASON=reload SESSION_IDLE=0 drive_pi_ext "$ext" session-start) \
+    || fail "session-start reload-busy drive failed: $out"
+  [ "$(classify pi "$id" "$state")" = "busy pi-ext" ] \
+    || fail "session_start(reload,!isIdle) must reconcile to busy, got '$(classify pi "$id" "$state")'"
+
+  # A fresh startup session_start must NOT clobber the record: the arm seed and
+  # agent_start own the initial busy, so reason=startup is a no-op even at isIdle.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen --source pi-ext --event agent-start
+  out=$(SESSION_REASON=startup SESSION_IDLE=1 drive_pi_ext "$ext" session-start) \
+    || fail "session-start startup drive failed: $out"
+  [ "$(classify pi "$id" "$state")" = "busy pi-ext" ] \
+    || fail "session_start(startup) must not reconcile away the launch-brief busy, got '$(classify pi "$id" "$state")'"
+  pass "pi extension reconciles a stale record on reload and leaves the startup launch-brief busy intact"
+}
+
+test_pi_extension_blocked_wrapper_emits_and_clears() {
+  command -v node >/dev/null 2>&1 || { pass "pi blocked wrapper skipped without node"; return; }
+  local rec id=busy-pi-block out ext state
+  rec=$(make_spawn_case pi-block pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  # A dialog that opens then resolves: exactly one active then one inactive,
+  # both labelled by the method only, with no title/body ever leaking.
+  out=$(drive_pi_ext_ui "$ext" resolve) || fail "resolve scenario failed: $out"
+  printf '%s\n' "$out" | grep -q 'AFTER_OPEN active_count=1' || fail "a dialog must emit exactly one herdr:blocked active on open: $out"
+  printf '%s\n' "$out" | grep -q '{"active":true,"label":"confirm"}' || fail "active emit must carry only the method label: $out"
+  printf '%s\n' "$out" | grep -q '{"active":false,"label":"confirm"}' || fail "a resolved dialog must clear blocked: $out"
+  printf '%s\n' "$out" | grep -q 'LEAKED=false' || fail "the dialog title/body must never leak into a herdr:blocked emit: $out"
+
+  # Nested / overlapping dialogs: two actives, two inactives (herdr's own
+  # blockedCount handles the nesting depth).
+  out=$(drive_pi_ext_ui "$ext" nested) || fail "nested scenario failed: $out"
+  printf '%s\n' "$out" | grep -q 'BOTH_OPEN actives=2' || fail "overlapping dialogs must each emit active: $out"
+  printf '%s\n' "$out" | grep -q 'AFTER_INNER inactives=1' || fail "resolving one dialog must clear exactly one: $out"
+
+  # A cancelled/rejected dialog still clears blocked exactly once and propagates.
+  out=$(drive_pi_ext_ui "$ext" cancel-reject) || fail "cancel-reject scenario failed: $out"
+  printf '%s\n' "$out" | grep -q 'REJECTED=true' || fail "a rejected dialog must still reject to the caller: $out"
+  printf '%s\n' "$out" | grep -q '{"active":false,"label":"input"}' || fail "a rejected dialog must clear blocked: $out"
+
+  # A synchronously-throwing dialog clears blocked and re-throws.
+  out=$(drive_pi_ext_ui "$ext" sync-throw) || fail "sync-throw scenario failed: $out"
+  printf '%s\n' "$out" | grep -q 'THREW=true' || fail "a throwing dialog must propagate its error: $out"
+  printf '%s\n' "$out" | grep -q '{"active":false,"label":"confirm"}' || fail "a throwing dialog must clear blocked: $out"
+
+  # Idempotent wrap: a reload re-enters session_start on the same ui object, but
+  # one dialog must still emit exactly one active and one inactive (no dup).
+  out=$(drive_pi_ext_ui "$ext" idempotent) || fail "idempotent scenario failed: $out"
+  printf '%s\n' "$out" | grep -q 'ACTIVES=1 INACTIVES=1' || fail "a re-wrapped ui must not double-emit per dialog: $out"
+  pass "pi extension emits herdr:blocked around ctx.ui dialogs, clears once on resolve/cancel/throw, stays idempotent across reload, and leaks only the method label"
 }
 
 test_pi_extension_stale_incarnation_rejected() {
@@ -344,6 +521,8 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
+test_pi_extension_session_start_reconciles_reload
+test_pi_extension_blocked_wrapper_emits_and_clears
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle

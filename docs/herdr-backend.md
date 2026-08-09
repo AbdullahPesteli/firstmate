@@ -222,8 +222,16 @@ The capture owner requests at least 200 lines from Herdr and trims locally to th
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
-A human-blocked permission dialog has no busy banner and still surfaces.
+The shared crew-state path therefore accepts a generic or screen-detected native `busy` as evidence of activity but never such an `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
+
+A verified full-lifecycle integration is the one authoritative exception.
+When Herdr reports `screen_detection_skipped` with an `agent_session.source` naming a lifecycle integration such as `herdr:pi` (verified against Herdr 0.8.0 plus Pi integration v8 in [`docs/verification/supervision.md`](verification/supervision.md)), its idle is turn-state authoritative, and `fm_backend_herdr_authoritative_state` exposes that verdict.
+`bin/fm-busy-lib.sh` uses it to reconcile a stale firstmate busy record: if the record still says busy while the full-lifecycle integration reports idle, the classifier returns a `conflict` verdict instead of busy, and `bin/fm-crew-state.sh` reconciles that against the task's terminal result or reports incomplete-idle so supervision continues or recovers it.
+No fixed busy TTL is used; only the authoritative lifecycle observation triggers the contradiction, and a long foreground tool reads busy from the same integration so it never becomes a false conflict.
+
+Full-lifecycle authority also suppresses Herdr screen detection, so a Pi interactive question or approval wait would otherwise be invisible.
+Pi 0.84.1 exposes no generic dialog lifecycle event and no installed package emits the shared `herdr:blocked` event the Pi integration listens for, so the per-task Pi extension `bin/fm-spawn.sh` installs wraps the one shared `ctx.ui` object and emits `herdr:blocked` with a non-sensitive method label while any `ctx.ui` dialog (confirm, select, input, editor, or custom, including MCP tool approval and elicitation) is open.
+Herdr's integration turns that into a `blocked` agent state and the transition policy (`bin/fm-transition-lib.sh`) treats it as immediately actionable; the extension only detects and relays the wait and never answers it.
 
 ## Composer and injection safety
 

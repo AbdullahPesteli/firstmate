@@ -154,12 +154,15 @@ pane_readable() {  # <target>
   esac
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
-# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
-# adapter answers from its own lifecycle record; Grok answers from its
+# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown|conflict> <source>". A
+# converted adapter answers from its own lifecycle record; Grok answers from its
 # isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
 # when no record exists, but its native `idle` is NOT, because agent.get
 # reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
+# foreground tool call) rather than turn state. The one exception is `conflict`:
+# a busy record that a verified full-lifecycle integration contradicts with a
+# live idle observation is stale, and the consumer below reconciles it against
+# the task's terminal result rather than reporting working.
 crew_busy_verdict() {  # <target>
   local tail40=''
   case "$HARNESS" in
@@ -549,6 +552,22 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
+    conflict)
+      # An authoritative full-lifecycle idle observation contradicts a still-busy
+      # firstmate record: the crew has settled and the busy record is stale (see
+      # fm-busy-lib.sh). NEVER report working. An idle/done agent is not
+      # automatically a completed task, so reconcile against the durable terminal
+      # or external-wait status first; if the task carries none, surface a
+      # deterministic incomplete-idle so supervision continues or recovers it
+      # instead of trusting the stale busy record.
+      if [ -n "$LOG_VERB" ]; then
+        CONFLICT_LOG_STATE=$(map_log_state "$LOG_LINE")
+        case "$CONFLICT_LOG_STATE" in
+          done|failed|paused|parked|blocked)
+            emit "$CONFLICT_LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}authoritative idle reconciled (${BUSY_VERDICT#* })" ;;
+        esac
+      fi
+      emit unknown pane "incomplete-idle: authoritative idle contradicts a stale busy record (${BUSY_VERDICT#* }); no terminal result - continue or recover" ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi

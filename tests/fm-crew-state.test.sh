@@ -116,7 +116,11 @@ case "${1:-}" in
     case "${2:-}" in
       get)
         [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] || exit 1
-        printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
+        # Optional full-lifecycle authority signals (screen_detection_skipped +
+        # agent_session.source). Absent by default so existing cases model a
+        # non-authoritative native verdict.
+        printf '{"result":{"agent":{"agent_status":"%s","screen_detection_skipped":%s,"agent_session":{"source":"%s"}}}}\n' \
+          "$FM_FAKE_HERDR_AGENT_STATUS" "${FM_FAKE_HERDR_SKIPPED:-false}" "${FM_FAKE_HERDR_SOURCE:-}"
         exit 0 ;;
     esac ;;
 esac
@@ -169,9 +173,11 @@ reset_fakes() {
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_SKIPPED=false
+  FM_FAKE_HERDR_SOURCE=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_SKIPPED FM_FAKE_HERDR_SOURCE FM_FAKE_CI_LOGS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -923,6 +929,92 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
 }
 
+# The exact 2026-08 incident: a stale pi-ext BUSY record (a Pi /reload replaced
+# the per-task extension mid-run so the settle was never recorded) while herdr's
+# full-lifecycle herdr:pi integration authoritatively reports idle. The crew must
+# NOT read working; with no terminal status it surfaces as incomplete-idle so
+# supervision continues or recovers it.
+test_conflict_stale_busy_vs_authoritative_idle_incomplete() {
+  command -v jq >/dev/null 2>&1 || { pass "conflict incomplete-idle skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case conflict-incomplete)
+  make_repo_on_branch "$d/wt" fm/feat-conflict
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-conflict.meta" "window=default:w1:p9" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  printf 'working: implementing the fix\n' > "$d/state/feat-conflict.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_SKIPPED=true
+  FM_FAKE_HERDR_SOURCE="herdr:pi"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-conflict)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-conflict busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  local out; out=$(run_crew_state "$d" feat-conflict)
+  assert_not_contains "$out" "state: working" "authoritative idle over a stale busy record must never read working"
+  assert_contains "$out" "incomplete-idle" "a stale busy record + authoritative idle + no terminal -> incomplete-idle"
+  # crew_absorb_class must surface it (none), not absorb as provably working.
+  local cls; cls=$(FM_CREW_STATE_BIN="$CREW_STATE" FM_STATE_OVERRIDE="$d/state" PATH="$d/fakebin:$PATH" bash -c '. "'"$ROOT"'/bin/fm-classify-lib.sh"; crew_absorb_class feat-conflict')
+  [ "$cls" = none ] || fail "an incomplete-idle conflict must surface (crew_absorb_class none), got '$cls'"
+  pass "stale busy record + authoritative full-lifecycle idle + no terminal status surfaces as incomplete-idle"
+}
+
+# An idle/done herdr agent is not automatically a completed task: when the task
+# DOES carry a durable terminal result, the conflict reconciles to that terminal
+# state instead of incomplete-idle.
+test_conflict_reconciles_against_terminal_status() {
+  command -v jq >/dev/null 2>&1 || { pass "conflict terminal reconcile skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case conflict-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-conflictterm
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-conflictterm.meta" "window=default:w1:p10" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  printf 'needs-decision: which database backend?\n' > "$d/state/feat-conflictterm.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_SKIPPED=true
+  FM_FAKE_HERDR_SOURCE="herdr:pi"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-conflictterm)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-conflictterm busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  local out; out=$(run_crew_state "$d" feat-conflictterm)
+  assert_contains "$out" "state: parked" "a needs-decision status reconciles the authoritative idle to parked"
+  assert_contains "$out" "authoritative idle reconciled" "the parked reconciliation names the authoritative idle"
+  pass "an authoritative-idle conflict reconciles against a durable terminal/decision status"
+}
+
+# A long foreground tool call is a legitimate quiet turn: the full-lifecycle
+# integration reports WORKING for it (the agent run is still active), so a busy
+# record must stay working and never be misread as an idle conflict.
+test_conflict_not_triggered_by_authoritative_working() {
+  command -v jq >/dev/null 2>&1 || { pass "conflict working-guard skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case conflict-working)
+  make_repo_on_branch "$d/wt" fm/feat-conflictwork
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-conflictwork.meta" "window=default:w1:p11" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  printf 'working: running a long build\n' > "$d/state/feat-conflictwork.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_SKIPPED=true
+  FM_FAKE_HERDR_SOURCE="herdr:pi"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-conflictwork)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-conflictwork busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  local out; out=$(run_crew_state "$d" feat-conflictwork)
+  assert_contains "$out" "state: working" "an authoritative working observation keeps a busy record working"
+  assert_contains "$out" "source: pane" "the busy record reads through the pane source"
+  pass "a legitimate long foreground tool call (authoritative working) never becomes an idle conflict"
+}
+
 # (g) no run + idle pane -> the status-log verb, as-is
 test_no_run_idle_pane_uses_log() {
   reset_fakes
@@ -1339,6 +1431,9 @@ test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
+test_conflict_stale_busy_vs_authoritative_idle_incomplete
+test_conflict_reconciles_against_terminal_status
+test_conflict_not_triggered_by_authoritative_working
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused

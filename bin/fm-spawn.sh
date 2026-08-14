@@ -134,6 +134,12 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every non-secondmate spawn additionally refuses, before branch prep, launch,
+#   or metadata publication, a candidate worktree whose canonical path already
+#   matches another task's recorded worktree= in state/*.meta (plain files only;
+#   symlinked meta is ignored and endpoint liveness is never an ownership
+#   bypass), so two tasks never share one isolated copy. A same-task relaunch
+#   into its own recorded worktree is exempt.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree

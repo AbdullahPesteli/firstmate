@@ -1,0 +1,48 @@
+Firstmate lock/worktree-ownership safety fixes — regression before/after evidence
+branch: fix/lock-and-worktree-ownership
+base (pre-fix):   6789876
+target (fixed):   b13148c
+
+Each regression test reproduces a real reported incident: it must FAIL on the
+pre-fix bin/ sources and PASS on the fixed sources. Positive controls in the
+same tests confirm normal behavior is preserved.
+
+================================================================================
+FIX 1 — spawn refuses a worktree already owned by another task
+  (bin/fm-spawn.sh: assert_spawn_worktree_unowned)
+  Test: tests/fm-spawn-worktree-settle.test.sh :: test_duplicate_worktree_owner_is_refused
+================================================================================
+
+>>> PRE-FIX (base bin) — expect FAILURE (spawn wrongly launches into the shared copy):
+ok - a single transient stale pane_current_path read is not accepted as the worktree
+ok - an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle
+not ok - spawn must refuse a worktree already owned by another task: expected exit 1, got 0
+
+>>> FIXED (target bin) — expect PASS (spawn refuses, names owner + canonical worktree, publishes no metadata):
+ok - a single transient stale pane_current_path read is not accepted as the worktree
+ok - an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle
+ok - spawn refuses a canonical worktree already owned by another task record
+# all fm-spawn-worktree-settle tests passed
+
+================================================================================
+FIX 2 — wake-queue lock recovery fails boundedly on an uncreatable lock path
+  (bin/fm-wake-lib.sh: FM_LOCK_CREATE_ERROR=uncreatable / uncreatable-path)
+  Test: tests/fm-wake-queue.test.sh :: test_uncreatable_lock_path_fails_without_recursive_steal
+  (isolated to avoid an unrelated pre-existing test that OOMs greps under host swap pressure)
+================================================================================
+
+>>> PRE-FIX (base bin) — expect FAILURE (unbounded: hangs past timeout, rc=124):
+not ok - an uncreatable lock path did not fail within three seconds (rc=124)
+
+>>> FIXED (target bin) — expect PASS (bounded failure via uncreatable-path; no .steal artifacts; positive controls: a valid absent lock still acquires and a stale dead-pid lock still recovers):
+ok - an uncreatable lock fails boundedly while valid and stale lock paths still acquire
+# uncreatable-lock isolated test passed
+
+================================================================================
+NOTE — unrelated pre-existing failure in the FULL fm-wake-queue.test.sh suite:
+  test 'the oversized unread status line was truncated or omitted' fails with
+  'grep: out of memory'. This test is untouched by this change (it exercises
+  status-line enrichment, not locks/worktree ownership) and fails only because
+  the host is under heavy swap pressure (11.7/12.0GB swap at session start).
+  It is an environmental/infra condition, not a product regression from this fix.
+================================================================================

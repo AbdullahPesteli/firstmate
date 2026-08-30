@@ -1,0 +1,51 @@
+############################################################
+# fm-dogfood-verify end-to-end: reproduce the reported bug  #
+#   'installed app silently serves a DIFFERENT commit'      #
+############################################################
+
+>> Activated commit (build A): 414650beba5f55f21fc4487dc347f8e3d2cbe3eb
+>> Served content at activation:
+     <h1>TodoFlow build A (ACTIVATED)</h1>
+
+>> [pin] activate build A into a dedicated, activation-owned copy
+PINNED /private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/records/todoflow sha=414650beba5f55f21fc4487dc347f8e3d2cbe3eb files=1 pin_dir=/private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/pins/todoflow-A
+LINK /private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/Application Support/TodoFlow/ui -> /private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/pins/todoflow-A/ui (was: (none))
+
+>> Live symlink now points at (dedicated pin, NOT the shared worktree):
+     /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T//fmdogfood-demo.j9iPgy/Application Support/TodoFlow/ui -> /private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/pins/todoflow-A/ui
+
+>> [verify] right after activation (read-only):
+PASS /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/records/todoflow sha=414650beba5f55f21fc4487dc347f8e3d2cbe3eb
+   exit=0
+
+------------------------------------------------------------
+>> An UNRELATED later task commits to the SAME shared worktree...
+>> Shared worktree HEAD moved to build B: 826783156a30a444ae20d279542bc742674e66dc
+>> Shared worktree now serves:
+     <h1>UNRELATED build B (never activated)</h1>
+
+>> But what the INSTALLED APP serves (via the live symlink) is:
+     <h1>TodoFlow build A (ACTIVATED)</h1>
+   ^^ still build A. The later commit did NOT change what is served.
+
+>> [verify] still truthful after the shared worktree advanced:
+PASS /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/records/todoflow sha=414650beba5f55f21fc4487dc347f8e3d2cbe3eb
+   exit=0
+
+------------------------------------------------------------
+>> DRIFT DETECTION (verify never lies).
+>> (a) live symlink repointed at the shared worktree (the old bug):
+FAIL symlink-drift: /private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/Application Support/TodoFlow/ui -> /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T//fmdogfood-demo.j9iPgy/shared-task-worktree/ui (expected /private/var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/pins/todoflow-A/ui)
+FAILED /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/records/todoflow (1 check(s) failed)
+   exit=1
+
+>> (b) a served file tampered inside the pinned copy:
+FAIL content-drift: index.html
+FAILED /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/records/todoflow (1 check(s) failed)
+   exit=1
+
+>> (c) restored -> PASS again:
+PASS /var/folders/p_/qhscbrm561d3rhlj3pv3yz780000gn/T/fmdogfood-demo.j9iPgy/records/todoflow sha=414650beba5f55f21fc4487dc347f8e3d2cbe3eb
+   exit=0
+
+############################  DONE  ############################

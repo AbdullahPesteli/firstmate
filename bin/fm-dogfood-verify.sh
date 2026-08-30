@@ -163,7 +163,31 @@ do_verify() {
     fi
   fi
 
-  local manifest=$PE_RECORD_DIR/manifest.tsv exp rel cur
+  # Live containment re-check. pin proved the served root and every served file
+  # resolve PHYSICALLY inside the immutable pinned worktree, but only at
+  # activation time. Between then and now a directory component or a served file
+  # could have been replaced by a symlink pointing at mutable content OUTSIDE the
+  # pin. If verify merely followed the recorded served_root and hashed whatever it
+  # landed on, an escape whose current bytes still match the manifest would report
+  # PASS while the app serves content that is no longer the pinned commit -
+  # exactly the drift this tool exists to catch. So we re-resolve live and name
+  # the escape instead of silently trusting the recorded path.
+  local pin_real='' served_real=''
+  if [ -n "$PE_PIN_DIR" ]; then
+    pin_real=$(canonicalize "$PE_PIN_DIR" 2>/dev/null) || pin_real=''
+  fi
+  if [ -n "$pin_real" ]; then
+    served_real=$(canonicalize "$PE_SERVED_ROOT" 2>/dev/null) || served_real=''
+    if [ -n "$served_real" ]; then
+      case "$served_real" in
+        "$pin_real"|"$pin_real"/*) : ;;
+        *) printf 'FAIL serve-root-escape: %s now resolves to %s, outside the pin %s\n' \
+             "$PE_SERVED_ROOT" "$served_real" "$pin_real"; fails=$((fails+1)) ;;
+      esac
+    fi
+  fi
+
+  local manifest=$PE_RECORD_DIR/manifest.tsv exp rel cur fphys
   if [ ! -f "$manifest" ]; then
     printf 'FAIL manifest-missing: %s\n' "$manifest"; fails=$((fails+1))
   else
@@ -171,6 +195,20 @@ do_verify() {
       [ -n "$exp" ] || continue
       if [ ! -f "$PE_SERVED_ROOT/$rel" ]; then
         printf 'FAIL content-missing: %s\n' "$rel"; fails=$((fails+1)); continue
+      fi
+      # Same containment invariant, per served file: a served path that now
+      # resolves outside the pin is an escape, not valid content, even if its
+      # bytes match. Skip hashing it and name the escape.
+      if [ -n "$pin_real" ]; then
+        fphys=$(canonicalize "$PE_SERVED_ROOT/$rel" 2>/dev/null) || fphys=''
+        if [ -z "$fphys" ]; then
+          printf 'FAIL content-missing: %s\n' "$rel"; fails=$((fails+1)); continue
+        fi
+        case "$fphys" in
+          "$pin_real"|"$pin_real"/*) : ;;
+          *) printf 'FAIL content-escape: %s now resolves to %s, outside the pin\n' \
+               "$rel" "$fphys"; fails=$((fails+1)); continue ;;
+        esac
       fi
       cur=$(sha256_file "$PE_SERVED_ROOT/$rel")
       if [ "$cur" != "$exp" ]; then

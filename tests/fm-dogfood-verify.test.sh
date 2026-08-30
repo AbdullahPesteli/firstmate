@@ -383,6 +383,43 @@ test_explicit_file_escape_is_refused() {
   pass "pin: refuses an explicit --file (parent path or escaping symlink) outside the pinned worktree"
 }
 
+test_verify_names_live_containment_escape() {
+  local case_dir src pin rec sha served outside
+  case_dir="$TMP_ROOT/liveescape"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" esc2
+  sha=$(git -C "$src" rev-parse HEAD)
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui >/dev/null || fail "pin failed"
+  served=$(sed -n 's/^served_root=//p' "$rec/pin.env")
+
+  # Baseline: the untouched pin PASSes.
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 0 ] || fail "verify should PASS on the untouched pin: $OUT"
+
+  # pin enforced containment at activation time. AFTER activation, a served file
+  # is replaced by a symlink to mutable content OUTSIDE the pin whose bytes match
+  # the recorded hash. Content hashing alone still matches, so only a live
+  # containment re-check catches that the app no longer serves the pinned copy.
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+  cp "$served/index.html" "$outside/index.html"   # byte-identical to the manifest
+  rm -f "$served/index.html"
+  ln -s "$outside/index.html" "$served/index.html"
+
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 1 ] || fail "verify should FAIL when a served path escapes the pin after activation, got $RC: $OUT"
+  assert_contains "$OUT" "content-escape" "the live containment escape was not named"
+
+  # Restore the real file inside the pin -> PASS again (verify itself changed
+  # nothing; the escape, not verify, was the mutation).
+  rm -f "$served/index.html"
+  cp "$outside/index.html" "$served/index.html"
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 0 ] || fail "verify should PASS after the escaped file is restored: $OUT"
+  pass "verify: names a live containment escape when a served path leaves the pin after activation"
+}
+
 test_usage_errors() {
   local out
   out=$("$SCRIPT" bogus 2>&1); RC=$?
@@ -406,4 +443,5 @@ test_pin_safety_and_reuse
 test_repin_over_existing_symlink
 test_serve_subdir_escape_is_refused
 test_explicit_file_escape_is_refused
+test_verify_names_live_containment_escape
 test_usage_errors

@@ -329,8 +329,11 @@ cmd_pin() {
     fi
     local tmp=$link.fmpin.$$
     rm -f "$tmp"
-    ln -s "$served_root" "$tmp" || fail "pin: cannot stage symlink at $tmp"
-    mv -f "$tmp" "$link" || { rm -f "$tmp"; fail "pin: cannot install symlink at $link"; }
+    ln -s "$served_root" "$tmp" || { rm -f "$tmp"; fail "pin: cannot stage symlink at $tmp"; }
+    if [ -L "$link" ]; then
+      rm -f "$link" || { rm -f "$tmp"; fail "pin: cannot remove existing symlink at $link"; }
+    fi
+    mv "$tmp" "$link" || { rm -f "$tmp"; fail "pin: cannot install symlink at $link"; }
   fi
 
   {

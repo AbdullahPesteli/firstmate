@@ -279,6 +279,53 @@ test_pin_safety_and_reuse() {
   pass "pin: refuses pin-dir inside source, refuses non-symlink clobber, reuses an identical pin"
 }
 
+test_repin_over_existing_symlink() {
+  local case_dir src pin1 pin2 rec1 rec2 link sha1 sha2 target stray
+  case_dir="$TMP_ROOT/repin"
+  src="$case_dir/src"; pin1="$case_dir/pin1"; pin2="$case_dir/pin2"
+  rec1="$case_dir/rec1"; rec2="$case_dir/rec2"
+  mkdir -p "$case_dir/live"
+  link="$case_dir/live/ui"
+  build_src "$src" first
+  sha1=$(git -C "$src" rev-parse HEAD)
+
+  # First activation creates the live symlink (link did not exist before).
+  "$SCRIPT" pin --source "$src" --sha "$sha1" --pin-dir "$pin1" --record "$rec1" \
+    --serve-subdir ui --link "$link" >/dev/null || fail "first pin failed"
+  [ -L "$link" ] || fail "first pin did not create the live symlink"
+
+  # A second commit, activated at the SAME live link into a DIFFERENT pin dir.
+  # This is the normal re-activation case: the link already exists as a
+  # symlink-to-directory and must be repointed, not dereferenced.
+  printf 'CHANGED\n' > "$src/ui/index.html"
+  git -C "$src" add -A
+  git -C "$src" commit -qm second
+  sha2=$(git -C "$src" rev-parse HEAD)
+  [ "$sha1" != "$sha2" ] || fail "fixture did not advance the source"
+
+  "$SCRIPT" pin --source "$src" --sha "$sha2" --pin-dir "$pin2" --record "$rec2" \
+    --serve-subdir ui --link "$link" >/dev/null \
+    || fail "re-pin onto an existing symlink-to-dir failed"
+
+  [ -L "$link" ] || fail "re-pin left the live path as a non-symlink"
+  target=$(readlink "$link")
+  case "$target" in
+    */pin2/ui) : ;;
+    *) fail "live symlink still resolves to $target, not the NEW pin copy" ;;
+  esac
+
+  # The old served directory must not have a stray staged symlink deposited in
+  # it (the dereference symptom).
+  stray=$(cd "$pin1/ui" && find . -maxdepth 1 -name 'ui.fmpin.*' -print 2>/dev/null)
+  [ -z "$stray" ] || fail "re-pin deposited a stray staged symlink inside the old copy: $stray"
+
+  # verify agrees the recorded activation is live and correct.
+  vout --skip-serve "$rec2"
+  [ "$RC" -eq 0 ] || fail "verify should PASS on the re-pinned activation: $OUT"
+  assert_contains "$OUT" "PASS" "re-pinned activation did not verify PASS"
+  pass "pin: re-pinning a different commit onto an existing symlink-to-dir repoints the link"
+}
+
 test_usage_errors() {
   local out
   out=$("$SCRIPT" bogus 2>&1); RC=$?
@@ -299,4 +346,5 @@ test_verify_pass_and_named_drifts
 test_verify_is_read_only
 test_serve_process_up_and_down
 test_pin_safety_and_reuse
+test_repin_over_existing_symlink
 test_usage_errors

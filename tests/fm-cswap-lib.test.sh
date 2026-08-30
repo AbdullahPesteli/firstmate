@@ -50,7 +50,10 @@ case "\${1:-}" in
     printf '}'
     ;;
   status)
-    printf '{"active":{"number":%s}}' "\$active"
+    # FAKE_CSWAP_STATUS_ACTIVE overrides the number reported by \`status\`
+    # (but not \`list\`), simulating the live active account having moved out
+    # from under a decision that was ranked against the \`list\` read.
+    printf '{"active":{"number":%s}}' "\${FAKE_CSWAP_STATUS_ACTIVE:-\$active}"
     ;;
   switch)
     printf 'switch %s\n' "\$2" >> "\$LOG"
@@ -115,6 +118,26 @@ test_noop_when_target_already_active() {
   pass "no switch is attempted when the best candidate is already the active account"
 }
 
+test_skips_switch_when_active_moved_under_lock() {
+  # The `list` read ranks a decision against active=1, but by the time the
+  # switch lock is held the live active has moved to 3 (a concurrent spawn
+  # switched). The chosen target (2) is now ranked against stale state, so
+  # the switch must be skipped (fail-closed), never fired onto an obsolete
+  # target.
+  local fakebin state marker log
+  read -r fakebin state marker log <<< "$(new_case stale-active)"
+  FAKE_CSWAP_STATUS_ACTIVE=3 PATH="$fakebin:$PATH" fm_cswap_dispatch_switch t1 "$state"
+  [ -s "$log" ] && fail "no switch may fire when the live active account moved under the lock, log: $(cat "$log")"
+  [ "$(cat "$marker")" = 1 ] || fail "active marker must be unchanged when the switch is skipped as stale"
+  [ "$(jq -r .switched < "$state/t1.cswap-select")" = false ] || fail "a stale-decision skip must record switched=false"
+  [ "$(jq -r .verified < "$state/t1.cswap-select")" = false ] || fail "a skipped switch is never verified"
+  case "$(jq -r .skippedReason < "$state/t1.cswap-select")" in
+    *stale*|*changed*|*concurrent*) : ;;
+    *) fail "skippedReason should explain the stale/concurrent-switch skip, got: $(jq -r .skippedReason < "$state/t1.cswap-select")" ;;
+  esac
+  pass "a decision ranked against a since-changed active account fails closed instead of executing an obsolete target"
+}
+
 test_skips_switch_when_another_claude_task_is_busy() {
   local fakebin state marker log
   read -r fakebin state marker log <<< "$(new_case busy-guard)"
@@ -161,6 +184,7 @@ test_no_evidence_when_cswap_absent() {
 test_switches_and_verifies_when_target_differs
 test_switch_verification_failure_is_recorded_not_hidden
 test_noop_when_target_already_active
+test_skips_switch_when_active_moved_under_lock
 test_skips_switch_when_another_claude_task_is_busy
 test_switches_when_other_claude_task_is_idle
 test_no_evidence_when_cswap_absent

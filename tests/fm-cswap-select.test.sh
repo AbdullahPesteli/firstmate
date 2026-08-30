@@ -55,6 +55,36 @@ JSON
   pass "5x at-risk of exhausting before reset vs 20x comfortably safe: the 20x account is chosen"
 }
 
+test_plan_size_breaks_a_tie_and_is_carried_in_evidence() {
+  # Two accounts identical on every other ranking key (same tier, same
+  # margin7d, same headroom) but different plan size: the larger plan must be
+  # chosen, and each account's plan must appear verbatim in the candidates
+  # evidence. Proves selection ranks BY plan size, not just headroom/runway.
+  local now=1735689600 r7 e7 cands out
+  r7=$((now + 400000))
+  e7=$((now + 900000))
+  cands=$(cat <<JSON
+[
+  {"number":1,"email":"5x@example.com","alias":"","disabled":false,"usageStatus":"ok","usageAgeSeconds":30,
+   "plan":5,"pct5h":10,"resets5hEpoch":$((now + 3600)),
+   "pct7d":20,"resets7dEpoch":$r7,"expectedPct7d":20,"aheadOfPace7d":false,
+   "willLastToReset7d":true,"projectedExhaustionAt7dEpoch":$e7},
+  {"number":2,"email":"20x@example.com","alias":"","disabled":false,"usageStatus":"ok","usageAgeSeconds":30,
+   "plan":20,"pct5h":10,"resets5hEpoch":$((now + 3600)),
+   "pct7d":20,"resets7dEpoch":$r7,"expectedPct7d":20,"aheadOfPace7d":false,
+   "willLastToReset7d":true,"projectedExhaustionAt7dEpoch":$e7}
+]
+JSON
+  )
+  out=$(printf '%s' "$cands" | jq -c --argjson now "$now" --argjson active 1 --argjson maxAgeS 1800 \
+    -f "$ROOT/bin/fm-cswap-select.jq")
+  [ "$(field "$out" .decision)" = switch ] || fail "the larger-plan account must win an otherwise-exact tie, got: $out"
+  [ "$(field "$out" .chosen)" = 2 ] || fail "expected the 20x-plan account (2) to be chosen over the tied 5x active one, got: $out"
+  [ "$(field "$out" '.candidates[0].plan')" = 5 ] || fail "account 1's plan size must be carried into evidence, got: $out"
+  [ "$(field "$out" '.candidates[1].plan')" = 20 ] || fail "account 2's plan size must be carried into evidence, got: $out"
+  pass "plan size breaks an otherwise-exact tie (larger plan chosen) and is recorded per account in evidence"
+}
+
 test_tie_stays_on_active_account() {
   local now=1735689600 cands out
   cands=$(cat <<JSON
@@ -149,6 +179,7 @@ JSON
 
 test_captain_scenario_5x_at_risk_vs_20x_safe_picks_20x
 test_untouched_account_with_no_5h_reset_timestamp_is_eligible
+test_plan_size_breaks_a_tie_and_is_carried_in_evidence
 test_tie_stays_on_active_account
 test_stale_usage_fails_closed_to_keep_current
 test_disabled_account_excluded_even_with_best_headroom

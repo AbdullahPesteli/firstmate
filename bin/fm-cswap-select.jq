@@ -8,10 +8,17 @@
 # account, already epoch-normalized by fm_cswap_augment_epochs (raw ISO8601
 # strings cannot reach here - jq's fromdateiso8601 does not accept cswap's
 # fractional-second/offset timestamps). Each row:
-#   {number, email, alias, disabled, usageStatus, usageAgeSeconds,
+#   {number, email, alias, disabled, usageStatus, usageAgeSeconds, plan,
 #    pct5h, resets5hEpoch, pct7d, resets7dEpoch,
 #    expectedPct7d, aheadOfPace7d, willLastToReset7d, projectedExhaustionAt7dEpoch}
-# Numeric/boolean fields are null when cswap did not report them.
+# Numeric/boolean fields are null when cswap did not report them. `plan` is
+# the account's plan-size multiplier when cswap exposes one; cswap's current
+# `list --json` schema carries no explicit plan field (it is null in
+# practice), because plan size is already folded into cswap's own weekly
+# pace math (expectedPct7d / projectedExhaustionAt7d / willLastToReset7d) -
+# a bigger plan yields a lower expected-pace and a longer projected runway.
+# It is still read and ranked so the figure is captured verbatim in evidence
+# and takes effect immediately if a future cswap build reports it.
 #
 # --argjson now        current epoch seconds
 # --argjson active     the currently active account number, or null
@@ -45,10 +52,12 @@
 #  3. Eligible accounts split into "safe" (willLastToReset7d true, or no
 #     projection at all) and the rest; safe accounts are preferred as a
 #     group over at-risk ones whenever at least one safe account exists.
-#  4. Within a tier, rank by margin7d (bigger buffer wins), then remaining
-#     7d headroom, then remaining 5h headroom, then - the deliberate
-#     tie-break - the currently active account, then account number for a
-#     fully deterministic order. Ranking the active account ahead of an
+#  4. Within a tier, rank by margin7d (bigger buffer wins), then plan size
+#     (a larger plan has more absolute capacity; null plans compare equal so
+#     the current cswap schema is unaffected), then remaining 7d headroom,
+#     then remaining 5h headroom, then - the deliberate tie-break - the
+#     currently active account, then account number for a fully
+#     deterministic order. Ranking the active account ahead of an
 #     otherwise-tied peer is what keeps a genuine tie on the current
 #     account rather than churning to an arbitrary equally-good one.
 #  5. No eligible candidate at all keeps the current account (fail-closed);
@@ -103,6 +112,7 @@ map(
     | (
         $pool | sort_by([
           -(.margin7dSeconds // 999999999999),
+          -(.plan // 0),
           -(.headroom7d // 0),
           -(.headroom5h // 0),
           (if .number == $active then 0 else 1 end),

@@ -17,6 +17,13 @@
 # quota-axi's own spendPriority for any other provider.
 #
 # SAFETY CONTRACT.
+#   - AUTHORIZATION. Selection is scoped to the captain's own cswap-managed
+#     accounts, and only the non-disabled ones: a `disabled` account is the
+#     captain's explicit "hold this out of rotation" signal and is never a
+#     candidate (fm-cswap-select.jq is_eligible). Firing at every claude
+#     dispatch boundary is intentional (AGENTS.md section 4 - this is the one
+#     place cswap economics are decided), bounded by that authorization set
+#     and by the mid-task guards below.
 #   - `cswap switch <exact-number>` only - never a bare rotate, never
 #     `--strategy`, so the target is always the one this library's own
 #     ranking chose and can name in evidence.
@@ -35,7 +42,11 @@
 #     re-confirms the live active number under a per-state-dir lock
 #     (state/.cswap-switch.lock) immediately before calling `cswap switch`,
 #     so two racing spawns can never both fire onto the same freshly-chosen
-#     target.
+#     target. If that re-confirmation shows the live active account has moved
+#     to some OTHER account since the list was read (a concurrent spawn
+#     already switched), the decision was ranked against stale state, so the
+#     switch is skipped (keep-current) rather than executing an obsolete
+#     target over a fresher selection.
 #   - After a switch, re-reads `cswap status --json` and records whether the
 #     active account actually became the intended one; a mismatch is
 #     recorded as verified=false and never reported as a successful switch.
@@ -47,9 +58,21 @@
 # no-op, so the decision remains inspectable after the fact:
 #   {ranAt, decision, chosen, reason, active, switched, verified,
 #    switchExitCode, skippedReason, candidates: [...]}
-# candidates carries every account's read inputs (pct5h/7d, resets, cswap's
-# own expectedPct/aheadOfPace/projectedExhaustionAt/willLastToReset for the
-# 7d window) plus this library's computed headroom/margin/reserve fields.
+# candidates carries every account's read inputs (plan, pct5h/7d, resets,
+# cswap's own expectedPct/aheadOfPace/projectedExhaustionAt/willLastToReset
+# for the 7d window) plus this library's computed headroom/margin/reserve
+# fields.
+#
+# PLAN SIZE. Selection ranks by plan size among the other inputs, but cswap's
+# current `list --json` schema exposes no explicit plan/planSize field (the
+# per-account keys are number/email/organization*/isOrganization/active/
+# usageStatus/usage/usageFetchedAt/usageAgeSeconds only), so `plan` reads
+# null today. That is not a gap: plan size is already folded into cswap's own
+# weekly pace math - a larger plan produces a lower expectedPct pace and a
+# longer projectedExhaustionAt runway, which is exactly the burn-runway-vs-
+# reset figure this library ranks on. `plan` is still extracted and ranked so
+# it is captured verbatim in evidence and takes effect the moment a future
+# cswap build begins reporting it, without a second owner of plan economics.
 #
 # Usage: . bin/fm-cswap-lib.sh
 #   fm_cswap_dispatch_switch <task-id> <state-dir>
@@ -154,6 +177,7 @@ fm_cswap_candidates() {
       disabled: (.disabled // false),
       usageStatus,
       usageAgeSeconds: (.usageAgeSeconds // null),
+      plan: (.plan // .planSize // .planMultiplier // null),
       pct5h: (.usage.fiveHour.pct // null),
       resets5h: (.usage.fiveHour.resetsAt // null),
       pct7d: (.usage.sevenDay.pct // null),
@@ -281,6 +305,13 @@ fm_cswap_dispatch_switch() {
 
   if [ "$now_active" = "$chosen" ]; then
     skipped_reason="already active (confirmed under lock, race with another selection)"
+  elif [ -n "$active" ] && [ -n "$now_active" ] && [ "$now_active" != "$active" ]; then
+    # The live active account moved between the `cswap list` read (active=$active)
+    # this decision was ranked against and this under-lock re-confirmation, so a
+    # concurrent spawn already switched. `chosen` was ranked against now-stale
+    # state; fire-and-forget onto it could clobber a fresher selection, so
+    # fail closed to keep-current rather than execute an obsolete target.
+    skipped_reason="active account changed to $now_active since selection (concurrent switch); decision is stale, keeping current"
   elif fm_cswap_any_other_claude_busy "$state" "$id"; then
     skipped_reason="another claude-harness task is currently busy; switching the shared credential could affect it mid-turn"
   fi

@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Behavior tests for bin/fm-dogfood-verify.sh.
+#
+# These exercise the two primitives through the real CLI: pin (immutable copy of
+# an exact commit + recorded manifest) and verify (live PASS or a specific named
+# drift). No project code and no live installed app are involved.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SCRIPT="$ROOT/bin/fm-dogfood-verify.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-dogfood-verify)
+fm_git_identity
+
+# Extra teardown: reap any serve process a test left running, then run the
+# registered temp-dir cleanup from tests/lib.sh.
+SERVE_PID=''
+dogfood_cleanup() {
+  if [ -n "$SERVE_PID" ]; then
+    kill "$SERVE_PID" 2>/dev/null || true
+    wait "$SERVE_PID" 2>/dev/null || true
+  fi
+  fm_test_cleanup
+}
+trap dogfood_cleanup EXIT
+trap 'dogfood_cleanup; exit 130' INT
+trap 'dogfood_cleanup; exit 143' TERM
+
+# build_src <dir> <content>: a repo with ui/index.html + ui/main.js, one commit.
+build_src() {
+  local d=$1 content=$2
+  mkdir -p "$d/ui"
+  printf '%s\n' "$content" > "$d/ui/index.html"
+  printf 'js-%s\n' "$content" > "$d/ui/main.js"
+  git -C "$d" init -q
+  git -C "$d" add -A
+  git -C "$d" commit -qm "ui $content"
+}
+
+# vout <args...>: run verify, capture combined output in OUT and status in RC.
+# Uses global writes (not command substitution) so RC survives to the caller.
+OUT=''
+RC=0
+vout() {
+  OUT=$("$SCRIPT" verify "$@" 2>&1)
+  RC=$?
+}
+
+test_pin_copies_exact_commit_not_shared_worktree() {
+  local case_dir src pin rec link sha head target src_phys
+  case_dir="$TMP_ROOT/copies"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  mkdir -p "$case_dir/live"
+  link="$case_dir/live/ui"
+  build_src "$src" v1
+  sha=$(git -C "$src" rev-parse HEAD)
+
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui --link "$link" >/dev/null \
+    || fail "pin failed for a clean activation"
+
+  head=$(git -C "$pin" rev-parse HEAD)
+  [ "$head" = "$sha" ] || fail "pinned copy HEAD ($head) is not the activated commit ($sha)"
+  assert_grep "sha=$sha" "$rec/pin.env" "pin.env did not record the exact sha"
+  assert_present "$rec/manifest.tsv" "no manifest was written"
+  [ -s "$rec/manifest.tsv" ] || fail "manifest is empty"
+
+  # The live symlink must point at the dedicated pin copy, never inside the
+  # shared source worktree that other tasks keep committing to.
+  [ -L "$link" ] || fail "live symlink was not created"
+  target=$(readlink "$link")
+  case "$target" in
+    */pin/ui) : ;;
+    *) fail "live symlink points at $target, not the dedicated pin copy" ;;
+  esac
+  src_phys=$(cd "$src" && pwd -P)
+  case "$target" in
+    "$src_phys"|"$src_phys"/*) fail "live symlink points INSIDE the shared source worktree: $target" ;;
+  esac
+  pass "pin: copies the exact commit into a dedicated pin, symlink not in the shared worktree"
+}
+
+test_later_source_commit_does_not_change_pin() {
+  local case_dir src pin rec sha1 sha2
+  case_dir="$TMP_ROOT/isolation"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" orig
+  sha1=$(git -C "$src" rev-parse HEAD)
+  "$SCRIPT" pin --source "$src" --sha "$sha1" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui >/dev/null || fail "pin failed"
+
+  # A later, unrelated commit on the ORIGINAL source worktree/branch.
+  printf 'CHANGED-BY-LATER-TASK\n' > "$src/ui/index.html"
+  git -C "$src" add -A
+  git -C "$src" commit -qm later
+  sha2=$(git -C "$src" rev-parse HEAD)
+  [ "$sha1" != "$sha2" ] || fail "fixture did not advance the source"
+
+  [ "$(git -C "$pin" rev-parse HEAD)" = "$sha1" ] \
+    || fail "the pinned copy moved when the source advanced"
+  [ "$(cat "$pin/ui/index.html")" = orig ] \
+    || fail "the pinned copy now serves the later commit's content"
+
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 0 ] || fail "verify should PASS on an untouched pin after the source advanced: $OUT"
+  assert_contains "$OUT" "PASS" "verify did not report PASS after the source advanced"
+  pass "pin: a later commit on the source does not change what the pinned copy serves"
+}
+
+test_verify_pass_and_named_drifts() {
+  local case_dir src pin rec link reg sha other served
+  case_dir="$TMP_ROOT/drift"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  mkdir -p "$case_dir/live"
+  link="$case_dir/live/ui"
+  reg="$case_dir/registry.json"
+  build_src "$src" base
+  sha=$(git -C "$src" rev-parse HEAD)
+  printf 'reg-v1\n' > "$reg"
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui --link "$link" --invariant registry="$reg" >/dev/null \
+    || fail "pin failed"
+  # The authoritative served target pin recorded (physical path); restore to it.
+  served=$(sed -n 's/^served_root=//p' "$rec/pin.env")
+
+  # A second commit exists so we can push the pinned worktree off its pin.
+  printf 'v2\n' > "$src/ui/index.html"
+  git -C "$src" add -A
+  git -C "$src" commit -qm v2
+  other=$(git -C "$src" rev-parse HEAD)
+
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 0 ] || fail "verify should PASS on the untouched pin: $OUT"
+  assert_contains "$OUT" "PASS" "untouched pin did not PASS"
+
+  # (1) symlink drift
+  ln -sfn "$case_dir" "$link"
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 1 ] || fail "symlink drift should exit 1, got $RC"
+  assert_contains "$OUT" "symlink-drift" "symlink drift was not named"
+  ln -sfn "$served" "$link"
+
+  # (2) HEAD drift: advance the pinned worktree itself
+  git -C "$pin" checkout -q "$other"
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 1 ] || fail "head drift should exit 1, got $RC"
+  assert_contains "$OUT" "head-drift" "head drift was not named"
+  git -C "$pin" checkout -q "$sha"
+
+  # (3) content drift: tamper a served file without moving HEAD
+  printf 'tampered\n' > "$pin/ui/index.html"
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 1 ] || fail "content drift should exit 1, got $RC"
+  assert_contains "$OUT" "content-drift" "content drift was not named"
+  assert_not_contains "$OUT" "head-drift" "content-only drift wrongly reported head drift"
+  git -C "$pin" checkout -q -- ui/index.html
+
+  # (4) invariant drift
+  printf 'reg-v2\n' > "$reg"
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 1 ] || fail "invariant drift should exit 1, got $RC"
+  assert_contains "$OUT" "invariant-drift" "invariant drift was not named"
+  printf 'reg-v1\n' > "$reg"
+
+  # Restored -> PASS again
+  vout --skip-serve "$rec"
+  [ "$RC" -eq 0 ] || fail "verify should PASS again after restore: $OUT"
+  assert_contains "$OUT" "PASS" "restored pin did not PASS"
+  pass "verify: PASS on an untouched pin, specific named FAIL for symlink/HEAD/content/invariant drift"
+}
+
+test_verify_is_read_only() {
+  local case_dir src pin rec link sha before after sentinel s_before list_before list_after
+  case_dir="$TMP_ROOT/readonly"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  mkdir -p "$case_dir/live"
+  link="$case_dir/live/ui"
+  build_src "$src" ro
+  sha=$(git -C "$src" rev-parse HEAD)
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui --link "$link" >/dev/null || fail "pin failed"
+  local served
+  served=$(sed -n 's/^served_root=//p' "$rec/pin.env")
+
+  sentinel="$case_dir/sentinel"
+  printf 'do-not-touch\n' > "$sentinel"
+  s_before=$(cat "$sentinel")
+  before=$(cat "$rec/pin.env" "$rec/manifest.tsv" "$rec/invariants.tsv" | sha256_of_stdin)
+  list_before=$(cd "$rec" && find . -maxdepth 1 | LC_ALL=C sort)
+
+  # A passing verify.
+  vout --skip-serve "$rec"
+  # A failing verify (drifted symlink) must also mutate nothing.
+  ln -sfn "$case_dir" "$link"
+  vout --skip-serve "$rec"
+  ln -sfn "$served" "$link"
+
+  after=$(cat "$rec/pin.env" "$rec/manifest.tsv" "$rec/invariants.tsv" | sha256_of_stdin)
+  list_after=$(cd "$rec" && find . -maxdepth 1 | LC_ALL=C sort)
+  [ "$before" = "$after" ] || fail "verify mutated the recorded activation files"
+  [ "$list_before" = "$list_after" ] || fail "verify added or removed files in the record dir"
+  assert_present "$sentinel" "verify deleted an unrelated file"
+  [ "$(cat "$sentinel")" = "$s_before" ] || fail "verify modified an unrelated file"
+  pass "verify: never deletes or mutates unrelated data (PASS or FAIL)"
+}
+
+# sha256_of_stdin: portable stdin hash used only by the read-only test.
+sha256_of_stdin() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}';
+  else sha256sum | awk '{print $1}'; fi
+}
+
+test_serve_process_up_and_down() {
+  local case_dir src pin rec sha marker out
+  if ! command -v pgrep >/dev/null 2>&1; then
+    pass "verify: serve-process check (skipped: pgrep not available)"
+    return 0
+  fi
+  case_dir="$TMP_ROOT/serve"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" serve
+  sha=$(git -C "$src" rev-parse HEAD)
+  marker="$case_dir/fmdogfood-serve-marker-$$"
+  mkdir -p "$case_dir"
+
+  # A real process whose argv[0] is the unique marker, so pgrep -f matches it.
+  ( exec -a "$marker" sleep 120 ) &
+  SERVE_PID=$!
+  sleep 0.2
+
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui --process-pattern "$marker" >/dev/null || fail "pin failed"
+
+  out=$("$SCRIPT" verify "$rec" 2>&1); RC=$?
+  [ "$RC" -eq 0 ] || fail "verify should PASS while the serve process is up: $out"
+  assert_contains "$out" "PASS" "serve-up verify did not PASS"
+
+  kill "$SERVE_PID" 2>/dev/null || true
+  wait "$SERVE_PID" 2>/dev/null || true
+  SERVE_PID=''
+
+  out=$("$SCRIPT" verify "$rec" 2>&1); RC=$?
+  [ "$RC" -eq 1 ] || fail "verify should FAIL once the serve process is gone, got $RC"
+  assert_contains "$out" "serve-process-down" "process-down drift was not named"
+  pass "verify: reports serve-process-down when the recorded process is gone"
+}
+
+test_pin_safety_and_reuse() {
+  local case_dir src pin rec sha out realdir
+  case_dir="$TMP_ROOT/safety"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" safe
+  sha=$(git -C "$src" rev-parse HEAD)
+
+  # pin-dir inside the source worktree is refused.
+  out=$("$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$src/inside" \
+    --record "$case_dir/rec-inside" --serve-subdir ui 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "pin-dir inside source should be refused (exit 2), got $RC"
+  assert_contains "$out" "inside the source worktree" "refusal did not explain the reason"
+  assert_absent "$src/inside" "a pin copy was created inside the source worktree"
+
+  # A clean pin, then a byte-identical reuse of the same commit + pin-dir.
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui >/dev/null || fail "first pin failed"
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$case_dir/rec2" \
+    --serve-subdir ui >/dev/null || fail "idempotent reuse of the same pin failed"
+
+  # Refuse to clobber a real (non-symlink) path at --link.
+  realdir="$case_dir/realdir"
+  mkdir -p "$realdir"
+  out=$("$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$case_dir/rec3" \
+    --serve-subdir ui --link "$realdir" 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "clobbering a non-symlink --link should be refused, got $RC"
+  assert_contains "$out" "non-symlink" "clobber refusal did not name the hazard"
+  assert_present "$realdir" "the real directory at --link was disturbed"
+  [ ! -L "$realdir" ] || fail "the real directory at --link was replaced by a symlink"
+  pass "pin: refuses pin-dir inside source, refuses non-symlink clobber, reuses an identical pin"
+}
+
+test_usage_errors() {
+  local out
+  out=$("$SCRIPT" bogus 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "an unknown subcommand should exit 2, got $RC"
+
+  out=$("$SCRIPT" verify 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "verify with no record path should exit 2, got $RC"
+  assert_contains "$out" "required" "missing-arg verify did not explain the requirement"
+
+  out=$("$SCRIPT" pin --source "$TMP_ROOT" 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "pin without required args should exit 2, got $RC"
+  pass "usage: unknown subcommand and missing required arguments exit 2"
+}
+
+test_pin_copies_exact_commit_not_shared_worktree
+test_later_source_commit_does_not_change_pin
+test_verify_pass_and_named_drifts
+test_verify_is_read_only
+test_serve_process_up_and_down
+test_pin_safety_and_reuse
+test_usage_errors

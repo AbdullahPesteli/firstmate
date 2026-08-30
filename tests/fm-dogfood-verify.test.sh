@@ -326,6 +326,27 @@ test_repin_over_existing_symlink() {
   pass "pin: re-pinning a different commit onto an existing symlink-to-dir repoints the link"
 }
 
+test_serve_subdir_escape_is_refused() {
+  local case_dir src pin rec sha out
+  case_dir="$TMP_ROOT/escape"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" esc
+  sha=$(git -C "$src" rev-parse HEAD)
+
+  # A --serve-subdir with parent components would otherwise resolve the served
+  # root OUTSIDE the pinned worktree, making the app serve content that is not
+  # part of the pinned commit. Give it a real existing sibling dir to escape to.
+  mkdir -p "$case_dir/outside"
+  printf 'not-in-the-pin\n' > "$case_dir/outside/index.html"
+
+  out=$("$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" \
+    --record "$rec" --serve-subdir '../outside' 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "a --serve-subdir that escapes the pin should be refused (exit 2), got $RC"
+  assert_contains "$out" "escapes the pinned worktree" "escape refusal was not named"
+  assert_absent "$rec/pin.env" "a pin record was written for an escaping served root"
+  pass "pin: refuses a --serve-subdir that escapes the pinned worktree"
+}
+
 test_usage_errors() {
   local out
   out=$("$SCRIPT" bogus 2>&1); RC=$?
@@ -347,4 +368,5 @@ test_verify_is_read_only
 test_serve_process_up_and_down
 test_pin_safety_and_reuse
 test_repin_over_existing_symlink
+test_serve_subdir_escape_is_refused
 test_usage_errors

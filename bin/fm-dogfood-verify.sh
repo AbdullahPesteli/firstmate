@@ -269,6 +269,14 @@ cmd_pin() {
     *) served_root=$pin_dir/$serve_subdir ;;
   esac
   [ -d "$served_root" ] || fail "pin: served directory does not exist: $served_root"
+  # Resolve physically and require containment: a --serve-subdir with parent
+  # components (e.g. ../other) must not let the served root escape the pinned
+  # worktree, or the app would serve content outside the pinned commit.
+  served_root=$(cd "$served_root" && pwd -P) || fail "pin: cannot resolve served directory: $served_root"
+  case "$served_root" in
+    "$pin_dir"|"$pin_dir"/*) : ;;
+    *) fail "pin: --serve-subdir escapes the pinned worktree: $serve_subdir" ;;
+  esac
 
   mkdir -p "$record" || fail "pin: cannot create --record dir: $record"
   record=$(abspath "$record")

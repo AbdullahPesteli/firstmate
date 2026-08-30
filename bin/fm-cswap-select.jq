@@ -62,12 +62,14 @@ def is_eligible:
   and ((.usageAgeSeconds == null) or (.usageAgeSeconds <= $maxAgeS));
 
 def margin7d_of:
-  if .projectedExhaustionAt7dEpoch == null then null
+  if (.projectedExhaustionAt7dEpoch == null) or (.resets7dEpoch == null) then null
   else .projectedExhaustionAt7dEpoch - .resets7dEpoch
   end;
 
 def reserve7d_of:
-  if .expectedPct7d == null then null else (.expectedPct7d - .pct7d) end;
+  if (.expectedPct7d == null) or (.pct7d == null) then null
+  else (.expectedPct7d - .pct7d)
+  end;
 
 def is_safe7d:
   (.willLastToReset7d == true) or (.projectedExhaustionAt7dEpoch == null);

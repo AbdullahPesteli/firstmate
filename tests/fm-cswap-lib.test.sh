@@ -192,6 +192,26 @@ test_switches_when_other_claude_task_is_idle() {
   pass "an idle (not busy) other claude-harness task does not block the switch"
 }
 
+test_candidate_disabled_normalization_matches_cswap_contract() {
+  # cswap's `list --json` omits `disabled` for an in-rotation account and emits
+  # it as `true` only when the slot is held out of rotation
+  # (claude_swap/json_output.py). fm_cswap_candidates must therefore normalize
+  # an absent key to enabled (false) and a present `true` to disabled (true),
+  # and must fail CLOSED on a present-but-null value (a partial/garbled read)
+  # by normalizing it to disabled (true) rather than silently enabling it.
+  local raw normalized
+  raw='{"activeAccountNumber":1,"accounts":[
+    {"number":1,"email":"enabled@example.com","usageStatus":"ok","usage":{"fiveHour":{"pct":1},"sevenDay":{"pct":1}}},
+    {"number":2,"email":"held@example.com","disabled":true,"usageStatus":"ok","usage":{"fiveHour":{"pct":1},"sevenDay":{"pct":1}}},
+    {"number":3,"email":"garbled@example.com","disabled":null,"usageStatus":"ok","usage":{"fiveHour":{"pct":1},"sevenDay":{"pct":1}}}
+  ]}'
+  normalized=$(fm_cswap_candidates "$raw") || fail "candidates must parse a real-shaped cswap payload"
+  [ "$(printf '%s' "$normalized" | jq -r '.[0].disabled')" = false ] || fail "an account omitting disabled must normalize to enabled (false), got: $normalized"
+  [ "$(printf '%s' "$normalized" | jq -r '.[1].disabled')" = true ] || fail "an account with disabled:true must normalize to disabled (true), got: $normalized"
+  [ "$(printf '%s' "$normalized" | jq -r '.[2].disabled')" = true ] || fail "an account with a null (unconfirmed) disabled must fail closed to disabled (true), got: $normalized"
+  pass "disabled normalization honors cswap's omit-when-enabled contract and fails closed on an unconfirmed value"
+}
+
 test_no_evidence_when_cswap_absent() {
   local d fakebin state
   d="$TMP_ROOT/absent"
@@ -215,6 +235,7 @@ test_skips_switch_when_active_moved_under_lock
 test_skips_switch_when_active_cannot_be_confirmed_under_lock
 test_skips_switch_when_another_claude_task_is_busy
 test_switches_when_other_claude_task_is_idle
+test_candidate_disabled_normalization_matches_cswap_contract
 test_no_evidence_when_cswap_absent
 
 echo "all fm-cswap-lib tests passed"

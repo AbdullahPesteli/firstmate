@@ -183,7 +183,21 @@ fm_cswap_candidates() {
     [.accounts[] | {
       number, email,
       alias: (.alias // ""),
-      disabled: (.disabled // false),
+      # cswap emits `disabled` ONLY for a slot held out of rotation
+      # (claude_swap/json_output.py: `row["disabled"] = True`); the key is
+      # omitted for an in-rotation account and is never serialized as false or
+      # null. Honor that confirmed contract - an ABSENT key is a positively
+      # in-rotation account (enabled) - but fail CLOSED on any present-but-
+      # ambiguous value: a bare null or a non-false scalar from a partial or
+      # garbled read is treated as disabled, never silently enabled onto the
+      # credential switch. (`.disabled // false` would have read such a null as
+      # enabled.)
+      disabled: (
+        if (has("disabled") | not) then false
+        elif (.disabled == false) then false
+        else true
+        end
+      ),
       usageStatus,
       usageAgeSeconds: (.usageAgeSeconds // null),
       plan: (.plan // .planSize // .planMultiplier // null),

@@ -151,6 +151,37 @@ JSON
   pass "a disabled account (held out of rotation) is never a selection candidate even with perfect headroom"
 }
 
+test_null_disabled_fails_closed_and_is_never_selected() {
+  # cswap's real `list --json` omits `disabled` for an in-rotation account and
+  # emits it as `true` only when a slot is held out of rotation
+  # (claude_swap/json_output.py); it never emits a bare `null`. A null disabled
+  # therefore signals a partial/garbled read whose authorization is UNCONFIRMED,
+  # and must fail CLOSED (excluded) rather than be silently treated as enabled
+  # and reach `cswap switch`. Account 1 here has otherwise-perfect headroom and
+  # a safe (null-projection) tier, so a fail-OPEN reading would wrongly switch
+  # to it; the fix must instead keep the explicitly-enabled active account.
+  local now=1735689600 cands out
+  cands=$(cat <<JSON
+[
+  {"number":1,"email":"unconfirmed@example.com","alias":"","disabled":null,"usageStatus":"ok","usageAgeSeconds":30,
+   "pct5h":0,"resets5hEpoch":$((now + 3600)),
+   "pct7d":0,"resets7dEpoch":$((now + 400000)),"expectedPct7d":20,"aheadOfPace7d":false,
+   "willLastToReset7d":true,"projectedExhaustionAt7dEpoch":null},
+  {"number":2,"email":"b@example.com","alias":"","disabled":false,"usageStatus":"ok","usageAgeSeconds":30,
+   "pct5h":50,"resets5hEpoch":$((now + 3600)),
+   "pct7d":50,"resets7dEpoch":$((now + 400000)),"expectedPct7d":50,"aheadOfPace7d":false,
+   "willLastToReset7d":true,"projectedExhaustionAt7dEpoch":$((now + 900000))}
+]
+JSON
+  )
+  out=$(printf '%s' "$cands" | jq -c --argjson now "$now" --argjson active 2 --argjson maxAgeS 1800 \
+    -f "$ROOT/bin/fm-cswap-select.jq")
+  [ "$(field "$out" '.candidates[0].eligible')" = false ] || fail "an account whose disabled state is null (unconfirmed) must be ineligible, got: $out"
+  [ "$(field "$out" .decision)" = keep-current ] || fail "a null-disabled account with perfect headroom must not trigger a switch, got: $out"
+  [ "$(field "$out" .chosen)" = 2 ] || fail "only the explicitly-enabled (disabled==false) account may be chosen, got: $out"
+  pass "an unconfirmed (null) disabled state fails closed and can never reach a credential switch"
+}
+
 test_untouched_account_with_no_5h_reset_timestamp_is_eligible() {
   # Verified live against the captain's real cswap accounts: a window with
   # 0% usage carries no resetsAt at all (nothing has opened it yet), so
@@ -178,6 +209,7 @@ JSON
 }
 
 test_captain_scenario_5x_at_risk_vs_20x_safe_picks_20x
+test_null_disabled_fails_closed_and_is_never_selected
 test_untouched_account_with_no_5h_reset_timestamp_is_eligible
 test_plan_size_breaks_a_tie_and_is_carried_in_evidence
 test_tie_stays_on_active_account

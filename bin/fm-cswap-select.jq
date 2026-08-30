@@ -64,7 +64,14 @@
 #     this function never chooses a switch on absent or stale evidence.
 
 def is_eligible:
-  (.disabled | not)
+  # Fail CLOSED on authorization: a candidate is eligible only when its
+  # disabled state is EXPLICITLY the boolean false (positively in-rotation).
+  # fm_cswap_augment_epochs/fm_cswap_candidates already normalize cswap's
+  # omit-when-enabled contract to a concrete boolean, so `== false` here means
+  # a null or otherwise-unconfirmed disabled state can never slip through as
+  # enabled and reach `cswap switch` (`.disabled | not` would have let a null
+  # pass as eligible).
+  (.disabled == false)
   and (.usageStatus == "ok")
   and (.pct5h != null) and (.pct7d != null)
   and (.pct5h < 100) and (.pct7d < 100)

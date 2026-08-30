@@ -1,0 +1,43 @@
+{
+  "generated": "read-only canary; NO switch fired",
+  "liveActiveAccountNumber": 1,
+  "decision": "keep-current",
+  "chosen": 1,
+  "reason": "active account 1 is already the best eligible candidate (margin7d=34.1d, headroom7d=93%)",
+  "candidates": [
+    {
+      "number": 1,
+      "disabled": false,
+      "usageStatus": "ok",
+      "usageAgeSeconds": 136.0,
+      "pct5h": 7.0,
+      "pct7d": 7.0,
+      "expectedPct7d": 41.1,
+      "aheadOfPace7d": null,
+      "willLastToReset7d": true,
+      "eligible": true,
+      "headroom5h": 93,
+      "headroom7d": 93,
+      "margin7dSeconds": 2946657,
+      "reserve7dPct": 34.1,
+      "safe7d": true
+    },
+    {
+      "number": 2,
+      "disabled": false,
+      "usageStatus": "ok",
+      "usageAgeSeconds": 194.2,
+      "pct5h": 98.0,
+      "pct7d": 41.0,
+      "expectedPct7d": 31.6,
+      "aheadOfPace7d": null,
+      "willLastToReset7d": null,
+      "eligible": true,
+      "headroom5h": 2,
+      "headroom7d": 59,
+      "margin7dSeconds": -139083,
+      "reserve7dPct": -9.399999999999999,
+      "safe7d": false
+    }
+  ]
+}

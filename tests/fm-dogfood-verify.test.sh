@@ -347,6 +347,42 @@ test_serve_subdir_escape_is_refused() {
   pass "pin: refuses a --serve-subdir that escapes the pinned worktree"
 }
 
+test_explicit_file_escape_is_refused() {
+  local case_dir src pin rec sha out secret
+  case_dir="$TMP_ROOT/fileescape"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" fesc
+  sha=$(git -C "$src" rev-parse HEAD)
+
+  # Mutable external content the activation must NOT be able to record/serve.
+  mkdir -p "$case_dir/outside"
+  secret="$case_dir/outside/secret.txt"
+  printf 'external-and-mutable\n' > "$secret"
+
+  # (1) A --file with parent components resolving outside the pinned worktree.
+  out=$("$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" \
+    --record "$rec" --serve-subdir ui --file '../../outside/secret.txt' 2>&1); RC=$?
+  [ "$RC" -eq 2 ] || fail "a --file escaping the pin should be refused (exit 2), got $RC"
+  assert_contains "$out" "escapes the pinned worktree" "file-escape refusal was not named"
+  assert_absent "$rec/pin.env" "a pin record was written for an escaping --file"
+  assert_absent "$rec/manifest.tsv" "a manifest was written for an escaping --file"
+
+  # (2) A served file that is a SYMLINK pointing outside the pinned worktree.
+  # It lives at a valid relative path inside served_root, but its target is the
+  # mutable external file, which must be refused just the same.
+  ln -s "$secret" "$pin/ui/leak.html"
+  out=$("$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" \
+    --record "$case_dir/rec2" --serve-subdir ui --file leak.html 2>&1); RC=$?
+  rm -f "$pin/ui/leak.html"
+  [ "$RC" -eq 2 ] || fail "a --file symlink escaping the pin should be refused (exit 2), got $RC"
+  assert_contains "$out" "escapes the pinned worktree" "symlink file-escape refusal was not named"
+  assert_absent "$case_dir/rec2/manifest.tsv" "a manifest was written for an escaping symlink --file"
+
+  # The external file was never touched by the refused pins.
+  [ "$(cat "$secret")" = 'external-and-mutable' ] || fail "the external file was disturbed"
+  pass "pin: refuses an explicit --file (parent path or escaping symlink) outside the pinned worktree"
+}
+
 test_usage_errors() {
   local out
   out=$("$SCRIPT" bogus 2>&1); RC=$?
@@ -369,4 +405,5 @@ test_serve_process_up_and_down
 test_pin_safety_and_reuse
 test_repin_over_existing_symlink
 test_serve_subdir_escape_is_refused
+test_explicit_file_escape_is_refused
 test_usage_errors

@@ -86,6 +86,31 @@ abspath() {  # <path>  (parent directory must already exist)
   esac
 }
 
+# canonicalize <path>: print the fully physical path of an EXISTING path,
+# following every symlink (including the final component). Portable stand-in for
+# `readlink -f` (absent on macOS). Fails on a symlink cycle. Used to contain
+# served files under the pinned worktree even when a component or the file
+# itself is a symlink pointing elsewhere.
+canonicalize() {
+  local p=$1 dir base target i=0
+  while [ "$i" -lt 64 ]; do
+    dir=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+    base=$(basename "$p")
+    case "$base" in
+      /|.) printf '%s\n' "$dir"; return 0 ;;
+    esac
+    p=$dir/$base
+    [ -L "$p" ] || { printf '%s\n' "$p"; return 0; }
+    target=$(readlink "$p")
+    case "$target" in
+      /*) p=$target ;;
+      *) p=$dir/$target ;;
+    esac
+    i=$((i+1))
+  done
+  return 1
+}
+
 read_pin_env() {  # <record-path>  -> sets PE_* globals
   local rp=$1 envf line k v
   if [ -d "$rp" ]; then envf=$rp/pin.env; else envf=$rp; fi
@@ -283,10 +308,24 @@ cmd_pin() {
 
   local -a served_files=()
   if [ "${#files[@]}" -gt 0 ]; then
-    local f
+    local f phys
     for f in "${files[@]}"; do
       reject_ctrl "$f" "--file"
-      [ -f "$served_root/$f" ] || fail "pin: --file not found under served root: $f"
+      case "$f" in
+        /*) fail "pin: --file must be relative to the served root: $f" ;;
+      esac
+      [ -e "$served_root/$f" ] || fail "pin: --file not found under served root: $f"
+      # Contain it PHYSICALLY: a --file with parent components (../x) or a file
+      # that is a symlink to content outside the pinned worktree must not let the
+      # activation record/serve mutable external data while claiming the pin is
+      # intact. verify follows the same relative path, so both must stay inside.
+      phys=$(canonicalize "$served_root/$f") \
+        || fail "pin: cannot resolve --file: $f"
+      case "$phys" in
+        "$pin_dir"|"$pin_dir"/*) : ;;
+        *) fail "pin: --file escapes the pinned worktree: $f" ;;
+      esac
+      [ -f "$phys" ] || fail "pin: --file is not a regular file: $f"
       served_files+=("$f")
     done
   else

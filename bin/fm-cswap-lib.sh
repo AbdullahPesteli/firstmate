@@ -17,13 +17,18 @@
 # quota-axi's own spendPriority for any other provider.
 #
 # SAFETY CONTRACT.
-#   - AUTHORIZATION. Selection is scoped to the captain's own cswap-managed
-#     accounts, and only the non-disabled ones: a `disabled` account is the
-#     captain's explicit "hold this out of rotation" signal and is never a
-#     candidate (fm-cswap-select.jq is_eligible). Firing at every claude
-#     dispatch boundary is intentional (AGENTS.md section 4 - this is the one
-#     place cswap economics are decided), bounded by that authorization set
-#     and by the mid-task guards below.
+#   - AUTHORIZATION. The whole mechanism is opt-in: fm-spawn.sh only calls this
+#     library when the captain has set FM_CSWAP_AUTOSELECT=1, the deliberate
+#     grant that opts a fleet into automated selection. Mutating the shared
+#     active Claude credential is never assumed just because a `cswap` CLI is
+#     installed; with the gate unset no cswap command runs at all. Within that
+#     grant, selection is scoped to the captain's own cswap-managed accounts,
+#     and only the non-disabled ones: a `disabled` account is the captain's
+#     explicit "hold this out of rotation" signal and is never a candidate
+#     (fm-cswap-select.jq is_eligible). Firing at every claude dispatch boundary
+#     is intentional (AGENTS.md section 4 - this is the one place cswap
+#     economics are decided), bounded by that authorization set and by the
+#     mid-task guards below.
 #   - `cswap switch <exact-number>` only - never a bare rotate, never
 #     `--strategy`, so the target is always the one this library's own
 #     ranking chose and can name in evidence.
@@ -46,7 +51,11 @@
 #     to some OTHER account since the list was read (a concurrent spawn
 #     already switched), the decision was ranked against stale state, so the
 #     switch is skipped (keep-current) rather than executing an obsolete
-#     target over a fresher selection.
+#     target over a fresher selection. If the re-confirmation itself fails
+#     (`cswap status --json` cannot report the live active account under the
+#     lock), the switch is likewise skipped fail-closed - an unconfirmable
+#     active account is never assumed to still be the one the decision ranked
+#     against, so a stale target can never be fired on a failed status read.
 #   - After a switch, re-reads `cswap status --json` and records whether the
 #     active account actually became the intended one; a mismatch is
 #     recorded as verified=false and never reported as a successful switch.
@@ -301,16 +310,24 @@ fm_cswap_dispatch_switch() {
 
   status_json=$(fm_cswap_status_json)
   now_active=$(printf '%s' "$status_json" | jq -r '.active.number // empty' 2>/dev/null)
-  [ -n "$now_active" ] || now_active=$active
 
-  if [ "$now_active" = "$chosen" ]; then
+  if [ -z "$now_active" ]; then
+    # `cswap status --json` failed to confirm the live active account under the
+    # lock. The decision was ranked against the pre-lock `cswap list` read; with
+    # no fresh confirmation we cannot rule out that a concurrent spawn moved the
+    # active account since, so firing `chosen` could clobber a fresher
+    # selection. Fail closed to keep-current rather than substitute the stale
+    # pre-lock value (which would silently bypass the changed-account guard).
+    skipped_reason="active account could not be confirmed under lock; decision may be stale, keeping current"
+  elif [ "$now_active" = "$chosen" ]; then
     skipped_reason="already active (confirmed under lock, race with another selection)"
-  elif [ -n "$active" ] && [ -n "$now_active" ] && [ "$now_active" != "$active" ]; then
-    # The live active account moved between the `cswap list` read (active=$active)
-    # this decision was ranked against and this under-lock re-confirmation, so a
-    # concurrent spawn already switched. `chosen` was ranked against now-stale
-    # state; fire-and-forget onto it could clobber a fresher selection, so
-    # fail closed to keep-current rather than execute an obsolete target.
+  elif [ "$now_active" != "$active" ]; then
+    # The live active account differs from the one the `cswap list` read
+    # (active=$active) ranked this decision against - a concurrent spawn already
+    # switched, or the active account was unknown at list time and is now some
+    # other account. Either way `chosen` was ranked against now-stale state;
+    # fire-and-forget onto it could clobber a fresher selection, so fail closed
+    # to keep-current rather than execute an obsolete target.
     skipped_reason="active account changed to $now_active since selection (concurrent switch); decision is stale, keeping current"
   elif fm_cswap_any_other_claude_busy "$state" "$id"; then
     skipped_reason="another claude-harness task is currently busy; switching the shared credential could affect it mid-turn"

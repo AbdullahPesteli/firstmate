@@ -50,6 +50,12 @@ case "\${1:-}" in
     printf '}'
     ;;
   status)
+    # FAKE_CSWAP_STATUS_FAIL=1 makes \`status\` fail with no output, simulating
+    # the live active account being unconfirmable under the lock (a stale
+    # decision must then fail closed, never fire the pre-lock target).
+    if [ "\${FAKE_CSWAP_STATUS_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
     # FAKE_CSWAP_STATUS_ACTIVE overrides the number reported by \`status\`
     # (but not \`list\`), simulating the live active account having moved out
     # from under a decision that was ranked against the \`list\` read.
@@ -138,6 +144,27 @@ test_skips_switch_when_active_moved_under_lock() {
   pass "a decision ranked against a since-changed active account fails closed instead of executing an obsolete target"
 }
 
+test_skips_switch_when_active_cannot_be_confirmed_under_lock() {
+  # `cswap status --json` fails to report the live active account while the
+  # switch lock is held. The decision was ranked against the pre-lock `list`
+  # read; without a fresh confirmation a concurrent switch cannot be ruled out,
+  # so the switch must fail closed (keep-current) rather than fire the pre-lock
+  # target - never substituting the stale list-time active as if it were still
+  # the confirmed live one.
+  local fakebin state marker log
+  read -r fakebin state marker log <<< "$(new_case unconfirmed-active)"
+  FAKE_CSWAP_STATUS_FAIL=1 PATH="$fakebin:$PATH" fm_cswap_dispatch_switch t1 "$state"
+  [ -s "$log" ] && fail "no switch may fire when the live active account cannot be confirmed under the lock, log: $(cat "$log")"
+  [ "$(cat "$marker")" = 1 ] || fail "active marker must be unchanged when the switch is skipped as unconfirmable"
+  [ "$(jq -r .switched < "$state/t1.cswap-select")" = false ] || fail "an unconfirmable-active skip must record switched=false"
+  [ "$(jq -r .verified < "$state/t1.cswap-select")" = false ] || fail "a skipped switch is never verified"
+  case "$(jq -r .skippedReason < "$state/t1.cswap-select")" in
+    *confirm*|*stale*) : ;;
+    *) fail "skippedReason should explain the unconfirmable-active skip, got: $(jq -r .skippedReason < "$state/t1.cswap-select")" ;;
+  esac
+  pass "a switch whose live active account cannot be confirmed under the lock fails closed instead of firing a possibly-stale target"
+}
+
 test_skips_switch_when_another_claude_task_is_busy() {
   local fakebin state marker log
   read -r fakebin state marker log <<< "$(new_case busy-guard)"
@@ -185,6 +212,7 @@ test_switches_and_verifies_when_target_differs
 test_switch_verification_failure_is_recorded_not_hidden
 test_noop_when_target_already_active
 test_skips_switch_when_active_moved_under_lock
+test_skips_switch_when_active_cannot_be_confirmed_under_lock
 test_skips_switch_when_another_claude_task_is_busy
 test_switches_when_other_claude_task_is_idle
 test_no_evidence_when_cswap_absent

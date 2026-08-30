@@ -28,7 +28,7 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 
 ## Account selection (cswap)
 
-When the captain's cswap-managed accounts are present, `../../../bin/fm-cswap-lib.sh` runs at every claude-harness spawn/relaunch boundary and may fire `cswap switch <exact-account>` before the launch command is sent, ranking accounts by remaining headroom plus cswap's own weekly burn-rate-vs-reset projection. It is best-effort and inert when cswap or jq is absent. See that script's header for the full safety contract (busy-task guard, no-op-on-already-active, post-switch verification) and `state/<id>.cswap-select` for per-dispatch evidence.
+When the captain opts in with `FM_CSWAP_AUTOSELECT=1`, `../../../bin/fm-cswap-lib.sh` runs at every claude-harness spawn/relaunch boundary and may fire `cswap switch <exact-account>` before the launch command is sent, ranking accounts by remaining headroom plus cswap's own weekly burn-rate-vs-reset projection. The gate is the captain's explicit grant to mutate the shared active credential: unset (the default) leaves the active account untouched and runs no cswap command. It is best-effort and inert when cswap or jq is absent. See that script's header for the full safety contract (busy-task guard, no-op-on-already-active, post-switch verification) and `state/<id>.cswap-select` for per-dispatch evidence.
 
 ## Primary integration
 

@@ -367,12 +367,26 @@ cmd_pin() {
       served_files+=("$f")
     done
   else
-    local rel
+    local rel phys
+    # Enumerate regular files AND symlinks. A plain `-type f` sweep silently omits
+    # symlink entries, so a served path that is (or traverses) a symlink pointing
+    # at mutable content OUTSIDE the pinned worktree would never reach the manifest
+    # - and pin/verify would both report success while the app serves un-pinned,
+    # mutable bytes. Contain every entry PHYSICALLY, exactly like the --file branch:
+    # an in-pin regular file (or in-pin symlink to one) is covered, an escape is
+    # rejected by name rather than dropped.
     while IFS= read -r rel; do
       rel=${rel#./}
       reject_ctrl "$rel" "served file path"
+      phys=$(canonicalize "$served_root/$rel") \
+        || fail "pin: cannot resolve served file: $rel"
+      case "$phys" in
+        "$pin_dir"|"$pin_dir"/*) : ;;
+        *) fail "pin: served file escapes the pinned worktree: $rel" ;;
+      esac
+      [ -f "$phys" ] || fail "pin: served entry is not a regular file: $rel"
       served_files+=("$rel")
-    done < <(cd "$served_root" && find . -name .git -prune -o -type f -print | LC_ALL=C sort)
+    done < <(cd "$served_root" && find . -name .git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
   fi
   [ "${#served_files[@]}" -gt 0 ] || fail "pin: no served files found under $served_root"
 

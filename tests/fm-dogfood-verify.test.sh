@@ -383,6 +383,38 @@ test_explicit_file_escape_is_refused() {
   pass "pin: refuses an explicit --file (parent path or escaping symlink) outside the pinned worktree"
 }
 
+test_default_enumeration_rejects_escaping_symlink() {
+  local case_dir src pin rec sha out secret
+  case_dir="$TMP_ROOT/autoescape"
+  src="$case_dir/src"; pin="$case_dir/pin"; rec="$case_dir/rec"
+  build_src "$src" autoesc
+  sha=$(git -C "$src" rev-parse HEAD)
+
+  # Mutable external content that lives OUTSIDE the pinned worktree.
+  mkdir -p "$case_dir/outside"
+  secret="$case_dir/outside/secret.txt"
+  printf 'external-and-mutable\n' > "$secret"
+
+  # A clean default-enumeration pin (no --file) succeeds and materializes the
+  # dedicated worktree copy.
+  "$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" --record "$rec" \
+    --serve-subdir ui >/dev/null || fail "clean default-enumeration pin failed"
+
+  # Now a served entry becomes a SYMLINK to that external mutable content. A plain
+  # `find -type f` sweep would omit it, so pin/verify would report success while
+  # the app serves un-pinned bytes. Default enumeration must instead NAME the
+  # escape and refuse, exactly like the explicit --file branch.
+  ln -s "$secret" "$pin/ui/leak.html"
+  out=$("$SCRIPT" pin --source "$src" --sha "$sha" --pin-dir "$pin" \
+    --record "$case_dir/rec2" --serve-subdir ui 2>&1); RC=$?
+  rm -f "$pin/ui/leak.html"
+  [ "$RC" -eq 2 ] || fail "default enumeration must refuse an escaping served symlink (exit 2), got $RC"
+  assert_contains "$out" "escapes the pinned worktree" "the escaping served symlink was not named"
+  assert_absent "$case_dir/rec2/manifest.tsv" "a manifest was written despite an escaping served symlink"
+  [ "$(cat "$secret")" = 'external-and-mutable' ] || fail "the external file was disturbed"
+  pass "pin: default enumeration refuses (does not omit) a served symlink that escapes the pin"
+}
+
 test_verify_names_live_containment_escape() {
   local case_dir src pin rec sha served outside
   case_dir="$TMP_ROOT/liveescape"
@@ -443,5 +475,6 @@ test_pin_safety_and_reuse
 test_repin_over_existing_symlink
 test_serve_subdir_escape_is_refused
 test_explicit_file_escape_is_refused
+test_default_enumeration_rejects_escaping_symlink
 test_verify_names_live_containment_escape
 test_usage_errors

@@ -295,6 +295,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-cswap-lib.sh
+. "$SCRIPT_DIR/fm-cswap-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -2984,6 +2986,14 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# Automated cswap account selection (AGENTS.md section 4 dispatch boundary):
+# a genuinely safe task boundary, right before this new claude-harness agent's
+# launch command is sent, never mid-task. Best effort only - see
+# bin/fm-cswap-lib.sh for the full safety contract; a flaky or absent cswap
+# never blocks this spawn.
+if [ "$HARNESS" = claude ]; then
+  fm_cswap_dispatch_switch "$ID" "$STATE" || true
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
